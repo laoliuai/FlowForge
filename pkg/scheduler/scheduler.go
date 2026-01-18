@@ -71,12 +71,14 @@ func (s *Scheduler) schedule(ctx context.Context) {
 			s.logger.Error("failed to enqueue task", zap.Error(err))
 			continue
 		}
-		_ = s.bus.Publish(ctx, "tasks", eventbus.Event{
-			Type: "task_queued",
-			Payload: map[string]interface{}{
-				"task_id": task.ID.String(),
-			},
-		})
+		taskEvent := eventbus.TaskEvent{
+			TaskID:     task.ID.String(),
+			WorkflowID: task.WorkflowID.String(),
+			Status:     string(model.TaskQueued),
+		}
+		if event, err := eventbus.NewEvent("task_queued", taskEvent); err == nil {
+			_ = s.bus.Publish(ctx, eventbus.ChannelTask, event)
+		}
 	}
 }
 

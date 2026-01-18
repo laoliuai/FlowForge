@@ -47,7 +47,9 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go controller.RunReconciler(ctx)
+	if err := controller.Start(ctx); err != nil {
+		logger.Fatal("failed to start controller", zap.Error(err))
+	}
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)

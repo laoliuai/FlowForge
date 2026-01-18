@@ -3,46 +3,84 @@ package eventbus
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
 
 type Event struct {
-	Type    string                 `json:"type"`
-	Payload map[string]interface{} `json:"payload"`
+	Type      string          `json:"type"`
+	Timestamp int64           `json:"timestamp"`
+	Data      json.RawMessage `json:"data"`
 }
 
-type Client interface {
-	Publish(ctx context.Context, channel string, message interface{}) *redis.IntCmd
-	Subscribe(ctx context.Context, channels ...string) *redis.PubSub
+type TaskEvent struct {
+	TaskID     string `json:"task_id"`
+	WorkflowID string `json:"workflow_id"`
+	Status     string `json:"status"`
+	Message    string `json:"message,omitempty"`
+	ExitCode   *int   `json:"exit_code,omitempty"`
 }
+
+type WorkflowEvent struct {
+	WorkflowID string `json:"workflow_id"`
+	Status     string `json:"status"`
+	Message    string `json:"message,omitempty"`
+}
+
+const (
+	ChannelTask     = "ff:events:task"
+	ChannelWorkflow = "ff:events:workflow"
+	ChannelQuota    = "ff:events:quota"
+)
 
 type Bus struct {
-	client Client
+	client redis.UniversalClient
 }
 
-func NewBus(client Client) *Bus {
+func NewBus(client redis.UniversalClient) *Bus {
 	return &Bus{client: client}
+}
+
+func NewEvent(eventType string, payload interface{}) (Event, error) {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return Event{}, err
+	}
+	return Event{
+		Type:      eventType,
+		Timestamp: time.Now().Unix(),
+		Data:      data,
+	}, nil
 }
 
 func (b *Bus) Publish(ctx context.Context, channel string, event Event) error {
 	payload, err := json.Marshal(event)
 	if err != nil {
-		return fmt.Errorf("marshal event: %w", err)
+		return err
 	}
 	return b.client.Publish(ctx, channel, payload).Err()
 }
 
-func (b *Bus) Subscribe(ctx context.Context, channel string, handler func(Event)) error {
-	sub := b.client.Subscribe(ctx, channel)
-	ch := sub.Channel()
-	for msg := range ch {
-		var event Event
-		if err := json.Unmarshal([]byte(msg.Payload), &event); err != nil {
-			continue
+func (b *Bus) Subscribe(ctx context.Context, channels ...string) <-chan *Event {
+	sub := b.client.Subscribe(ctx, channels...)
+	ch := make(chan *Event, 100)
+
+	go func() {
+		defer close(ch)
+		for msg := range sub.Channel() {
+			var event Event
+			if err := json.Unmarshal([]byte(msg.Payload), &event); err != nil {
+				continue
+			}
+			ch <- &event
 		}
-		handler(event)
-	}
-	return nil
+	}()
+
+	go func() {
+		<-ctx.Done()
+		_ = sub.Close()
+	}()
+
+	return ch
 }

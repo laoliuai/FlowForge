@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
@@ -55,6 +56,16 @@ func NewWorkflowController(
 	}
 }
 
+func (c *WorkflowController) Start(ctx context.Context) error {
+	taskEvents := c.bus.Subscribe(ctx, eventbus.ChannelTask)
+
+	go c.handleTaskEvents(ctx, taskEvents)
+	go c.RunReconciler(ctx)
+
+	c.logger.Info("workflow controller started")
+	return nil
+}
+
 func (c *WorkflowController) SubmitWorkflow(ctx context.Context, workflow *model.Workflow) error {
 	tasks, err := c.parser.Parse(workflow.ID.String(), workflow.DAGSpec)
 	if err != nil {
@@ -73,12 +84,14 @@ func (c *WorkflowController) SubmitWorkflow(ctx context.Context, workflow *model
 	c.initWorkflowState(workflow, tasks)
 
 	for _, task := range tasks {
-		_ = c.bus.Publish(ctx, "tasks", eventbus.Event{
-			Type: "task_created",
-			Payload: map[string]interface{}{
-				"task_id": task.ID.String(),
-			},
-		})
+		taskEvent := eventbus.TaskEvent{
+			TaskID:     task.ID.String(),
+			WorkflowID: task.WorkflowID.String(),
+			Status:     string(task.Status),
+		}
+		if event, err := eventbus.NewEvent("task_created", taskEvent); err == nil {
+			_ = c.bus.Publish(ctx, eventbus.ChannelTask, event)
+		}
 	}
 
 	return c.startWorkflow(ctx, workflow.ID.String())
@@ -189,12 +202,14 @@ func (c *WorkflowController) queueTask(ctx context.Context, task *model.Task) er
 
 	c.updateTaskState(task, model.TaskQueued)
 
-	_ = c.bus.Publish(ctx, "tasks", eventbus.Event{
-		Type: "task_queued",
-		Payload: map[string]interface{}{
-			"task_id": task.ID.String(),
-		},
-	})
+	taskEvent := eventbus.TaskEvent{
+		TaskID:     task.ID.String(),
+		WorkflowID: task.WorkflowID.String(),
+		Status:     string(model.TaskQueued),
+	}
+	if event, err := eventbus.NewEvent("task_queued", taskEvent); err == nil {
+		_ = c.bus.Publish(ctx, eventbus.ChannelTask, event)
+	}
 
 	return nil
 }
@@ -212,16 +227,55 @@ func (c *WorkflowController) skipTask(ctx context.Context, task *model.Task) err
 	return nil
 }
 
-func (c *WorkflowController) HandleTaskUpdate(ctx context.Context, taskID string, status model.TaskStatus, errMsg string) error {
+func (c *WorkflowController) handleTaskEvents(ctx context.Context, events <-chan *eventbus.Event) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event, ok := <-events:
+			if !ok {
+				return
+			}
+			c.processTaskEvent(ctx, event)
+		}
+	}
+}
+
+func (c *WorkflowController) processTaskEvent(ctx context.Context, event *eventbus.Event) {
+	var taskEvent eventbus.TaskEvent
+	if err := json.Unmarshal(event.Data, &taskEvent); err != nil {
+		c.logger.Error("failed to unmarshal task event", zap.Error(err))
+		return
+	}
+
+	if taskEvent.TaskID == "" {
+		return
+	}
+
+	if taskEvent.WorkflowID != "" {
+		_ = c.ensureWorkflowState(ctx, taskEvent.WorkflowID)
+	}
+
+	status := model.TaskStatus(taskEvent.Status)
+	if err := c.HandleTaskUpdate(ctx, taskEvent.TaskID, status, taskEvent.Message, taskEvent.ExitCode); err != nil {
+		c.logger.Error("failed to handle task update", zap.String("task_id", taskEvent.TaskID), zap.Error(err))
+	}
+}
+
+func (c *WorkflowController) HandleTaskUpdate(ctx context.Context, taskID string, status model.TaskStatus, errMsg string, exitCode *int) error {
 	task, err := c.taskRepo.GetByID(ctx, taskID)
 	if err != nil {
 		return err
 	}
+	c.ensureWorkflowState(ctx, task.WorkflowID.String())
 
 	now := time.Now()
 	updates := map[string]interface{}{}
 	if errMsg != "" {
 		updates["error_message"] = errMsg
+	}
+	if exitCode != nil {
+		updates["exit_code"] = exitCode
 	}
 
 	switch status {

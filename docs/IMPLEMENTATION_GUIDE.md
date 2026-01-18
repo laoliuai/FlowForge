@@ -1988,7 +1988,7 @@ func (s *Server) setupRouter() {
 		api.GET("/workflows/:id", workflowHandler.Get)
 		api.DELETE("/workflows/:id", workflowHandler.Cancel)
 		api.GET("/workflows/:id/tasks", workflowHandler.ListTasks)
-		api.GET("/workflows/:id/logs", workflowHandler.StreamLogs)
+		api.GET("/tasks/:id/logs", workflowHandler.StreamLogs)
 
 		// Quota handlers
 		quotaHandler := handlers.NewQuotaHandler(s.db, s.logger)

@@ -402,6 +402,7 @@ func (c *WorkflowController) reconcile(ctx context.Context) {
 	}
 
 	for _, workflowID := range c.activeWorkflowIDs() {
+		c.refreshWorkflowState(ctx, workflowID)
 		if err := c.scheduleReadyTasks(ctx, workflowID); err != nil {
 			c.logger.Error("failed to schedule ready tasks", zap.String("workflow_id", workflowID), zap.Error(err))
 		}
@@ -475,6 +476,40 @@ func (c *WorkflowController) activeWorkflowIDs() []string {
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+func (c *WorkflowController) refreshWorkflowState(ctx context.Context, workflowID string) {
+	tasks, err := c.taskRepo.ListByWorkflowID(ctx, workflowID)
+	if err != nil {
+		c.logger.Error("failed to refresh workflow tasks", zap.String("workflow_id", workflowID), zap.Error(err))
+		return
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	state, ok := c.activeWorkflows[workflowID]
+	if !ok {
+		return
+	}
+
+	state.pending = 0
+	state.running = 0
+	state.finished = 0
+	state.tasks = make(map[string]*model.Task, len(tasks))
+
+	for i := range tasks {
+		task := tasks[i]
+		state.tasks[task.ID.String()] = &tasks[i]
+		switch {
+		case isRunningStatus(task.Status):
+			state.running++
+		case isFinishedStatus(task.Status):
+			state.finished++
+		default:
+			state.pending++
+		}
+	}
 }
 
 func (c *WorkflowController) evaluateCondition(condition string, state *workflowState) bool {

@@ -24,6 +24,8 @@ type Task struct {
 	WorkflowID    uuid.UUID `gorm:"type:uuid;not null;index"`
 	Workflow      *Workflow `gorm:"foreignKey:WorkflowID"`
 	Name          string    `gorm:"not null;uniqueIndex:idx_workflow_task_name"`
+	GangID        string    `gorm:"index"`
+	ReplicaIndex  int       `gorm:"default:0"`
 	TemplateName  string
 	Image         string         `gorm:"not null"`
 	Command       pq.StringArray `gorm:"type:text[]"`

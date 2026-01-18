@@ -251,6 +251,15 @@ func (r *TaskRepository) GetRetryableTasks(ctx context.Context) ([]model.Task, e
 	return tasks, err
 }
 
+func (r *TaskRepository) ListByWorkflowID(ctx context.Context, workflowID string) ([]model.Task, error) {
+	var tasks []model.Task
+	err := r.db.WithContext(ctx).
+		Preload("Dependencies").
+		Where("workflow_id = ?", workflowID).
+		Find(&tasks).Error
+	return tasks, err
+}
+
 func (r *TaskRepository) SetOutput(ctx context.Context, taskID, key string, value interface{}) error {
 	return r.db.WithContext(ctx).Exec(`
 		UPDATE tasks

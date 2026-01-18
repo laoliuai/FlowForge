@@ -13,11 +13,16 @@ type Event struct {
 	Payload map[string]interface{} `json:"payload"`
 }
 
-type Bus struct {
-	client redis.UniversalClient
+type Client interface {
+	Publish(ctx context.Context, channel string, message interface{}) *redis.IntCmd
+	Subscribe(ctx context.Context, channels ...string) *redis.PubSub
 }
 
-func NewBus(client redis.UniversalClient) *Bus {
+type Bus struct {
+	client Client
+}
+
+func NewBus(client Client) *Bus {
 	return &Bus{client: client}
 }
 

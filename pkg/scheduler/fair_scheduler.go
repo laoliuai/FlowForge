@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"sort"
 	"time"
@@ -31,6 +32,15 @@ type SchedulableTask struct {
 	TenantID          uuid.UUID
 	EffectivePriority float64
 	QuotaWeight       int
+}
+
+type SchedulableGang struct {
+	Tasks             []*model.Task
+	ProjectID         uuid.UUID
+	TenantID          uuid.UUID
+	EffectivePriority float64
+	QuotaWeight       int
+	CreatedAt         time.Time
 }
 
 func NewFairScheduler(
@@ -65,14 +75,24 @@ func (fs *FairScheduler) Schedule(ctx context.Context) error {
 		return err
 	}
 
-	tasksByTenant := make(map[string][]*SchedulableTask)
+	gangsByKey := make(map[string]*SchedulableGang)
+	readyGang := make(map[string]bool)
 	for i := range pendingTasks {
-		task := pendingTasks[i]
-		if !dependenciesSatisfied(&task, dependencyStatus) {
+		task := &pendingTasks[i]
+		if task.Workflow == nil || task.Workflow.Project == nil || task.Workflow.Project.Group == nil {
 			continue
 		}
 
-		if task.Workflow == nil || task.Workflow.Project == nil || task.Workflow.Project.Group == nil {
+		gangKey := task.GangID
+		if gangKey == "" {
+			gangKey = task.ID.String()
+		}
+
+		if _, ok := readyGang[gangKey]; !ok {
+			readyGang[gangKey] = true
+		}
+		if !dependenciesSatisfied(task, dependencyStatus) {
+			readyGang[gangKey] = false
 			continue
 		}
 
@@ -84,93 +104,158 @@ func (fs *FairScheduler) Schedule(ctx context.Context) error {
 			weight = 100
 		}
 
-		schedulable := &SchedulableTask{
-			Task:        &task,
-			ProjectID:   project.ID,
-			TenantID:    group.TenantID,
-			QuotaWeight: weight,
+		if _, ok := gangsByKey[gangKey]; !ok {
+			gangsByKey[gangKey] = &SchedulableGang{
+				Tasks:     []*model.Task{},
+				ProjectID: project.ID,
+				TenantID:  group.TenantID,
+				CreatedAt: task.CreatedAt,
+			}
 		}
 
-		tasksByTenant[group.TenantID.String()] = append(tasksByTenant[group.TenantID.String()], schedulable)
+		gang := gangsByKey[gangKey]
+		gang.Tasks = append(gang.Tasks, task)
+		if task.CreatedAt.Before(gang.CreatedAt) {
+			gang.CreatedAt = task.CreatedAt
+		}
+		gang.QuotaWeight = weight
 	}
 
-	for _, tasks := range tasksByTenant {
-		for _, task := range tasks {
-			task.EffectivePriority = fs.calculateEffectivePriority(ctx, task)
+	gangsByTenant := make(map[string][]*SchedulableGang)
+	for gangKey, gang := range gangsByKey {
+		if !readyGang[gangKey] || len(gang.Tasks) == 0 {
+			continue
+		}
+		gangsByTenant[gang.TenantID.String()] = append(gangsByTenant[gang.TenantID.String()], gang)
+	}
+
+	for _, gangs := range gangsByTenant {
+		for _, gang := range gangs {
+			gang.EffectivePriority = fs.calculateGangPriority(ctx, gang)
 		}
 
-		sort.Slice(tasks, func(i, j int) bool {
-			return tasks[i].EffectivePriority > tasks[j].EffectivePriority
+		sort.Slice(gangs, func(i, j int) bool {
+			return gangs[i].EffectivePriority > gangs[j].EffectivePriority
 		})
 	}
 
 	scheduled := 0
-	for scheduled < fs.maxBatch && len(tasksByTenant) > 0 {
-		for tenantID, tasks := range tasksByTenant {
-			if len(tasks) == 0 {
-				delete(tasksByTenant, tenantID)
+	for scheduled < fs.maxBatch && len(gangsByTenant) > 0 {
+		for tenantID, gangs := range gangsByTenant {
+			if len(gangs) == 0 {
+				delete(gangsByTenant, tenantID)
 				continue
 			}
 
-			schedulable := tasks[0]
-			tasksByTenant[tenantID] = tasks[1:]
+			schedulable := gangs[0]
+			gangsByTenant[tenantID] = gangs[1:]
 
-			canSchedule, _ := fs.quotaManager.CanSchedule(ctx, schedulable.ProjectID, schedulable.Task.GetResourceRequest())
-			if !canSchedule {
+			if len(schedulable.Tasks) > fs.maxBatch && scheduled > 0 {
+				continue
+			}
+			if scheduled+len(schedulable.Tasks) > fs.maxBatch && scheduled > 0 {
 				continue
 			}
 
-			if err := fs.quotaManager.Reserve(ctx, schedulable.ProjectID, schedulable.Task.GetResourceRequest()); err != nil {
-				fs.logger.Debug("failed to reserve quota", zap.Error(err))
+			if err := fs.scheduleGang(ctx, schedulable); err != nil {
+				fs.logger.Debug("failed to schedule gang", zap.Error(err))
 				continue
 			}
 
-			queuedAt := time.Now()
-			updates := map[string]interface{}{
-				"queued_at": &queuedAt,
-			}
-			if err := fs.taskRepo.UpdateStatus(ctx, schedulable.Task.ID.String(), model.TaskQueued, updates); err != nil {
-				_ = fs.quotaManager.Release(ctx, schedulable.ProjectID, schedulable.Task.GetResourceRequest())
-				continue
-			}
-
-			schedulable.Task.Status = model.TaskQueued
-			schedulable.Task.QueuedAt = &queuedAt
-
-			if err := fs.taskQueue.Enqueue(ctx, schedulable.Task); err != nil {
-				_ = fs.quotaManager.Release(ctx, schedulable.ProjectID, schedulable.Task.GetResourceRequest())
-				_ = fs.taskRepo.UpdateStatus(ctx, schedulable.Task.ID.String(), model.TaskPending, map[string]interface{}{
-					"queued_at": nil,
-				})
-				continue
-			}
-
-			fs.publishTaskQueued(ctx, schedulable.Task)
-			scheduled++
+			scheduled += len(schedulable.Tasks)
 		}
 	}
 
 	return nil
 }
 
-func (fs *FairScheduler) calculateEffectivePriority(ctx context.Context, task *SchedulableTask) float64 {
+func (fs *FairScheduler) calculateGangPriority(ctx context.Context, gang *SchedulableGang) float64 {
 	basePriority := 0.0
-	if task.Task.Workflow != nil {
-		basePriority = float64(task.Task.Workflow.Priority)
+	if len(gang.Tasks) > 0 && gang.Tasks[0].Workflow != nil {
+		basePriority = float64(gang.Tasks[0].Workflow.Priority)
 	}
 
-	quotaBoost := float64(task.QuotaWeight) / 100.0
+	quotaBoost := float64(gang.QuotaWeight) / 100.0
 
-	waitTime := time.Since(task.Task.CreatedAt)
+	waitTime := time.Since(gang.CreatedAt)
 	waitBoost := math.Min(waitTime.Minutes()/60.0, 1.0) * 10
 
 	utilizationPenalty := 0.0
-	usage, err := fs.quotaManager.GetUsageSummary(ctx, "tenant", task.TenantID)
+	usage, err := fs.quotaManager.GetUsageSummary(ctx, "tenant", gang.TenantID)
 	if err == nil && usage != nil && usage.UtilizationPercent > 80 {
 		utilizationPenalty = (usage.UtilizationPercent - 80) / 20 * 5
 	}
 
 	return basePriority + quotaBoost*20 + waitBoost - utilizationPenalty
+}
+
+func (fs *FairScheduler) scheduleGang(ctx context.Context, gang *SchedulableGang) error {
+	reserved := make([]*model.Task, 0, len(gang.Tasks))
+	for _, task := range gang.Tasks {
+		canSchedule, _ := fs.quotaManager.CanSchedule(ctx, gang.ProjectID, task.GetResourceRequest())
+		if !canSchedule {
+			fs.releaseQuotaForTasks(ctx, gang.ProjectID, reserved)
+			return fmt.Errorf("insufficient quota for gang")
+		}
+
+		if err := fs.quotaManager.Reserve(ctx, gang.ProjectID, task.GetResourceRequest()); err != nil {
+			fs.releaseQuotaForTasks(ctx, gang.ProjectID, reserved)
+			return err
+		}
+		reserved = append(reserved, task)
+	}
+
+	if err := fs.queueGangTasks(ctx, gang.Tasks); err != nil {
+		fs.releaseQuotaForTasks(ctx, gang.ProjectID, reserved)
+		return err
+	}
+
+	return nil
+}
+
+func (fs *FairScheduler) queueGangTasks(ctx context.Context, tasks []*model.Task) error {
+	queuedAt := time.Now()
+	queued := make([]*model.Task, 0, len(tasks))
+
+	for _, task := range tasks {
+		updates := map[string]interface{}{
+			"queued_at": &queuedAt,
+		}
+		if err := fs.taskRepo.UpdateStatus(ctx, task.ID.String(), model.TaskQueued, updates); err != nil {
+			fs.resetQueuedTasks(ctx, queued)
+			return err
+		}
+
+		task.Status = model.TaskQueued
+		task.QueuedAt = &queuedAt
+
+		if err := fs.taskQueue.Enqueue(ctx, task); err != nil {
+			queued = append(queued, task)
+			fs.resetQueuedTasks(ctx, queued)
+			return err
+		}
+
+		fs.publishTaskQueued(ctx, task)
+		queued = append(queued, task)
+	}
+
+	return nil
+}
+
+func (fs *FairScheduler) resetQueuedTasks(ctx context.Context, tasks []*model.Task) {
+	for _, task := range tasks {
+		_ = fs.taskRepo.UpdateStatus(ctx, task.ID.String(), model.TaskPending, map[string]interface{}{
+			"queued_at": nil,
+		})
+		task.Status = model.TaskPending
+		task.QueuedAt = nil
+	}
+}
+
+func (fs *FairScheduler) releaseQuotaForTasks(ctx context.Context, projectID uuid.UUID, tasks []*model.Task) {
+	for _, task := range tasks {
+		_ = fs.quotaManager.Release(ctx, projectID, task.GetResourceRequest())
+	}
 }
 
 func (fs *FairScheduler) loadDependencyStatuses(ctx context.Context, tasks []model.Task) (map[uuid.UUID]model.TaskStatus, error) {

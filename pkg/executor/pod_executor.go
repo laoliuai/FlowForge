@@ -80,6 +80,8 @@ func (e *PodExecutor) buildPod(task *model.Task, tenantID, projectID, namespace 
 				"flowforge.io/workflow-id":     task.WorkflowID.String(),
 				"flowforge.io/task-id":         task.ID.String(),
 				"flowforge.io/task-name":       task.Name,
+				"flowforge.io/gang-id":         task.GangID,
+				"flowforge.io/replica-index":   fmt.Sprintf("%d", task.ReplicaIndex),
 				"flowforge.io/tenant-id":       tenantID,
 				"flowforge.io/project-id":      projectID,
 				"flowforge.io/workload":        "true",

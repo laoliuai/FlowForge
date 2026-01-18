@@ -37,6 +37,7 @@ type DAGTask struct {
 	Dependencies []string   `json:"dependencies,omitempty"`
 	Arguments    *Arguments `json:"arguments,omitempty"`
 	When         string     `json:"when,omitempty"`
+	Replicas     int        `json:"replicas,omitempty"`
 }
 
 type ContainerTemplate struct {
@@ -136,28 +137,47 @@ func (p *Parser) Parse(workflowID string, spec model.JSONB) ([]*model.Task, erro
 	}
 
 	tasks := make([]*model.Task, 0, len(entryTemplate.DAG.Tasks))
-	taskNameToID := make(map[string]string)
+	taskGroups := make(map[string][]*model.Task)
 
 	for _, dagTask := range entryTemplate.DAG.Tasks {
-		task, err := p.convertTask(workflowID, &dagTask, &dagSpec)
-		if err != nil {
-			return nil, fmt.Errorf("failed to convert task '%s': %w", dagTask.Name, err)
+		replicas := dagTask.Replicas
+		if replicas <= 0 {
+			replicas = 1
 		}
-		tasks = append(tasks, task)
-		taskNameToID[dagTask.Name] = task.ID.String()
+		for replicaIndex := 0; replicaIndex < replicas; replicaIndex++ {
+			task, err := p.convertTask(workflowID, &dagTask, &dagSpec)
+			if err != nil {
+				return nil, fmt.Errorf("failed to convert task '%s': %w", dagTask.Name, err)
+			}
+			task.GangID = dagTask.Name
+			task.ReplicaIndex = replicaIndex
+			if replicas > 1 {
+				task.Name = fmt.Sprintf("%s-%d", dagTask.Name, replicaIndex)
+			}
+			tasks = append(tasks, task)
+			taskGroups[dagTask.Name] = append(taskGroups[dagTask.Name], task)
+		}
 	}
 
-	for i, dagTask := range entryTemplate.DAG.Tasks {
-		for _, depName := range dagTask.Dependencies {
-			depID, ok := taskNameToID[depName]
-			if !ok {
-				return nil, fmt.Errorf("dependency '%s' not found for task '%s'", depName, dagTask.Name)
+	for _, dagTask := range entryTemplate.DAG.Tasks {
+		depTasks, ok := taskGroups[dagTask.Name]
+		if !ok {
+			continue
+		}
+		for _, task := range depTasks {
+			for _, depName := range dagTask.Dependencies {
+				dependencyGroup, ok := taskGroups[depName]
+				if !ok {
+					return nil, fmt.Errorf("dependency '%s' not found for task '%s'", depName, dagTask.Name)
+				}
+				for _, dependencyTask := range dependencyGroup {
+					task.Dependencies = append(task.Dependencies, model.TaskDependency{
+						TaskID:      task.ID,
+						DependsOnID: dependencyTask.ID,
+						Type:        "success",
+					})
+				}
 			}
-			tasks[i].Dependencies = append(tasks[i].Dependencies, model.TaskDependency{
-				TaskID:      tasks[i].ID,
-				DependsOnID: uuid.MustParse(depID),
-				Type:        "success",
-			})
 		}
 	}
 

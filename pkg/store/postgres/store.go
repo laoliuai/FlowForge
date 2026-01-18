@@ -136,6 +136,16 @@ func (r *WorkflowRepository) List(ctx context.Context, projectID string, status 
 	return workflows, total, err
 }
 
+func (r *WorkflowRepository) ListByStatus(ctx context.Context, status model.WorkflowStatus) ([]model.Workflow, error) {
+	var workflows []model.Workflow
+	err := r.db.WithContext(ctx).
+		Preload("Tasks").
+		Preload("Tasks.Dependencies").
+		Where("status = ?", status).
+		Find(&workflows).Error
+	return workflows, err
+}
+
 type TaskRepository struct {
 	db *gorm.DB
 }

@@ -311,9 +311,9 @@ func (h *WorkflowHandler) ListTasks(c *gin.Context) {
 }
 
 func (h *WorkflowHandler) GetLogs(c *gin.Context) {
-	workflowID, err := uuid.Parse(c.Param("id"))
+	taskID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid workflow id"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid task id"})
 		return
 	}
 
@@ -323,7 +323,7 @@ func (h *WorkflowHandler) GetLogs(c *gin.Context) {
 		return
 	}
 
-	taskIDStr := strings.TrimSpace(c.Query("task_id"))
+	workflowIDStr := strings.TrimSpace(c.Query("workflow_id"))
 	level := strings.TrimSpace(c.Query("level"))
 	search := strings.TrimSpace(c.Query("search"))
 
@@ -361,9 +361,18 @@ func (h *WorkflowHandler) GetLogs(c *gin.Context) {
 		limit = value
 	}
 
+	var workflowID *uuid.UUID
+	if workflowIDStr != "" {
+		value, err := uuid.Parse(workflowIDStr)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid workflow id"})
+			return
+		}
+		workflowID = &value
+	}
+
 	query := store.LogQuery{
-		WorkflowID: workflowID.String(),
-		TaskID:     taskIDStr,
+		TaskID:    taskID.String(),
 		StartTime:  startTime,
 		EndTime:    endTime,
 		Level:      level,
@@ -371,12 +380,11 @@ func (h *WorkflowHandler) GetLogs(c *gin.Context) {
 		Limit:      limit,
 	}
 
-	if follow {
-		if taskIDStr == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "task_id is required for follow mode"})
-			return
-		}
+	if workflowID != nil {
+		query.WorkflowID = workflowID.String()
+	}
 
+	if follow {
 		c.Writer.Header().Set("Content-Type", "text/event-stream")
 		c.Writer.Header().Set("Cache-Control", "no-cache")
 		c.Writer.Header().Set("Connection", "keep-alive")
@@ -393,7 +401,7 @@ func (h *WorkflowHandler) GetLogs(c *gin.Context) {
 			c.SSEvent("log", log)
 		}
 
-		channel := "logs:task:" + taskIDStr
+		channel := "logs:task:" + taskID.String()
 		pubsub := h.redis.Client().Subscribe(c.Request.Context(), channel)
 		defer pubsub.Close()
 

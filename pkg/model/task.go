@@ -47,8 +47,8 @@ type Task struct {
 	PodName       string
 	PodUID        string
 	NodeName      string
-	Outputs       JSONB `gorm:"type:jsonb;default:'{}'"`
-	WhenCondition string
+	Outputs       JSONB            `gorm:"type:jsonb;default:'{}'"`
+	WhenCondition string           `gorm:"not null;default:''"`
 	Dependencies  []TaskDependency `gorm:"foreignKey:TaskID"`
 	Events        []TaskEvent      `gorm:"foreignKey:TaskID"`
 	CreatedAt     time.Time

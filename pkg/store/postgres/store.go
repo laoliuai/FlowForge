@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -174,13 +175,30 @@ func (r *TaskRepository) UpdateStatus(ctx context.Context, id string, status mod
 
 func (r *TaskRepository) GetPendingTasks(ctx context.Context, workflowID string) ([]model.Task, error) {
 	var tasks []model.Task
-	query := r.db.WithContext(ctx).Model(&model.Task{}).Where("status = ?", model.TaskPending)
-	if workflowID != "" {
-		query = query.Where("workflow_id = ?", workflowID)
-	}
-	err := query.Find(&tasks).Error
-	if err != nil {
-		return nil, err
-	}
-	return tasks, nil
+	err := r.db.WithContext(ctx).
+		Preload("Dependencies").
+		Where("workflow_id = ? AND status = ?", workflowID, model.TaskPending).
+		Find(&tasks).Error
+	return tasks, err
+}
+
+func (r *TaskRepository) GetRetryableTasks(ctx context.Context) ([]model.Task, error) {
+	var tasks []model.Task
+	err := r.db.WithContext(ctx).
+		Where("status = ? AND next_retry_at <= ?", model.TaskRetrying, time.Now()).
+		Find(&tasks).Error
+	return tasks, err
+}
+
+func (r *TaskRepository) SetOutput(ctx context.Context, taskID, key string, value interface{}) error {
+	return r.db.WithContext(ctx).Exec(`
+		UPDATE tasks
+		SET outputs = outputs || ?::jsonb, updated_at = NOW()
+		WHERE id = ?
+	`, fmt.Sprintf(`{"%s": %s}`, key, mustMarshal(value)), taskID).Error
+}
+
+func mustMarshal(v interface{}) string {
+	b, _ := json.Marshal(v)
+	return string(b)
 }

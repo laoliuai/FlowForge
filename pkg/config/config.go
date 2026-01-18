@@ -66,7 +66,7 @@ type AuthConfig struct {
 
 type LoggingConfig struct {
 	Level  string `mapstructure:"level"`
-	Format string `mapstructure:"format"`
+	Format string `mapstructure:"format"` // json or console
 }
 
 func Load() (*Config, error) {

@@ -10,41 +10,38 @@ import (
 )
 
 type Client struct {
-	client redis.UniversalClient
+	rdb redis.UniversalClient
 }
 
 func NewClient(cfg *config.RedisConfig) (*Client, error) {
-	var client redis.UniversalClient
+	var rdb redis.UniversalClient
+
 	if cfg.ClusterMode {
-		client = redis.NewClusterClient(&redis.ClusterOptions{
+		rdb = redis.NewClusterClient(&redis.ClusterOptions{
 			Addrs:    cfg.Addresses,
 			Password: cfg.Password,
 			PoolSize: cfg.PoolSize,
 		})
 	} else {
-		addr := "localhost:6379"
-		if len(cfg.Addresses) > 0 {
-			addr = cfg.Addresses[0]
-		}
-		client = redis.NewClient(&redis.Options{
-			Addr:     addr,
+		rdb = redis.NewClient(&redis.Options{
+			Addr:     cfg.Addresses[0],
 			Password: cfg.Password,
 			DB:       cfg.DB,
 			PoolSize: cfg.PoolSize,
 		})
 	}
 
-	if err := client.Ping(context.Background()).Err(); err != nil {
+	if err := rdb.Ping(context.Background()).Err(); err != nil {
 		return nil, fmt.Errorf("failed to connect to redis: %w", err)
 	}
 
-	return &Client{client: client}, nil
+	return &Client{rdb: rdb}, nil
 }
 
 func (c *Client) Client() redis.UniversalClient {
-	return c.client
+	return c.rdb
 }
 
 func (c *Client) Close() error {
-	return c.client.Close()
+	return c.rdb.Close()
 }

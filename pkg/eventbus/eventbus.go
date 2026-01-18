@@ -44,5 +44,5 @@ func (b *Bus) Subscribe(ctx context.Context, channel string, handler func(Event)
 		}
 		handler(event)
 	}
-	return sub.Err()
+	return nil
 }

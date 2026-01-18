@@ -176,6 +176,20 @@ func (r *TaskRepository) GetByID(ctx context.Context, id string) (*model.Task, e
 	return &task, nil
 }
 
+func (r *TaskRepository) GetByIDWithWorkflow(ctx context.Context, id string) (*model.Task, error) {
+	var task model.Task
+	err := r.db.WithContext(ctx).
+		Preload("Dependencies").
+		Preload("Workflow").
+		Preload("Workflow.Project").
+		Preload("Workflow.Project.Group").
+		First(&task, "id = ?", id).Error
+	if err != nil {
+		return nil, err
+	}
+	return &task, nil
+}
+
 func (r *TaskRepository) UpdateStatus(ctx context.Context, id string, status model.TaskStatus, updates map[string]interface{}) error {
 	if updates == nil {
 		updates = make(map[string]interface{})

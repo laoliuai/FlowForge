@@ -117,3 +117,7 @@ func (s *Server) setupRouter() {
 func (s *Server) Router() *gin.Engine {
 	return s.router
 }
+
+func (s *Server) LogRepo() store.LogStore {
+	return s.logRepo
+}

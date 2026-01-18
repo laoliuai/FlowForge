@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -10,8 +11,10 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"google.golang.org/grpc"
 
 	"github.com/flowforge/flowforge/pkg/apiserver"
+	apigrpc "github.com/flowforge/flowforge/pkg/apiserver/grpc"
 	"github.com/flowforge/flowforge/pkg/config"
 	"github.com/flowforge/flowforge/pkg/store/postgres"
 	redisclient "github.com/flowforge/flowforge/pkg/store/redis"
@@ -54,6 +57,23 @@ func main() {
 		}
 	}()
 
+	grpcServer := grpc.NewServer()
+	grpcHandler := apigrpc.NewServer(db, redis, server.LogRepo(), logger)
+	grpcHandler.Register(grpcServer)
+
+	grpcAddr := fmt.Sprintf(":%d", cfg.Server.GRPCPort)
+	grpcListener, err := net.Listen("tcp", grpcAddr)
+	if err != nil {
+		logger.Fatal("Failed to listen on gRPC port", zap.Int("port", cfg.Server.GRPCPort), zap.Error(err))
+	}
+
+	go func() {
+		logger.Info("Starting gRPC server", zap.Int("port", cfg.Server.GRPCPort))
+		if err := grpcServer.Serve(grpcListener); err != nil {
+			logger.Fatal("gRPC server error", zap.Error(err))
+		}
+	}()
+
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
@@ -66,4 +86,6 @@ func main() {
 	if err := httpServer.Shutdown(ctx); err != nil {
 		logger.Error("Server forced to shutdown", zap.Error(err))
 	}
+
+	grpcServer.GracefulStop()
 }

@@ -5,13 +5,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	pb "github.com/flowforge/flowforge/pkg/api/proto"
+	"github.com/flowforge/flowforge/pkg/eventbus"
 	"github.com/flowforge/flowforge/pkg/model"
 	"github.com/flowforge/flowforge/pkg/store"
 	"github.com/flowforge/flowforge/pkg/store/postgres"
@@ -24,6 +28,7 @@ type Server struct {
 	redis   *redisclient.Client
 	logger  *zap.Logger
 	logRepo store.LogStore
+	bus     *eventbus.Bus
 }
 
 func NewServer(db *postgres.Store, redis *redisclient.Client, logRepo store.LogStore, logger *zap.Logger) *Server {
@@ -32,11 +37,54 @@ func NewServer(db *postgres.Store, redis *redisclient.Client, logRepo store.LogS
 		redis:   redis,
 		logger:  logger,
 		logRepo: logRepo,
+		bus:     eventbus.NewBus(redis.Client()),
 	}
 }
 
 func (s *Server) UpdateStatus(ctx context.Context, req *pb.UpdateStatusRequest) (*pb.UpdateStatusResponse, error) {
-	// Implementation for status update (to be migrated from HTTP or kept as alternative)
+	taskIDRaw := strings.TrimSpace(req.GetTaskId())
+	workflowIDRaw := strings.TrimSpace(req.GetWorkflowId())
+	statusRaw := strings.TrimSpace(req.GetStatus())
+
+	if taskIDRaw == "" || workflowIDRaw == "" {
+		return nil, status.Error(codes.InvalidArgument, "task_id and workflow_id are required")
+	}
+
+	taskID, err := uuid.Parse(taskIDRaw)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid task_id: %v", err)
+	}
+
+	workflowID, err := uuid.Parse(workflowIDRaw)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid workflow_id: %v", err)
+	}
+
+	if statusRaw == "" {
+		return nil, status.Error(codes.InvalidArgument, "status is required")
+	}
+
+	normalizedStatus := model.TaskStatus(strings.ToUpper(statusRaw))
+	if !isValidTaskStatus(normalizedStatus) {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid status: %s", statusRaw)
+	}
+
+	taskEvent := eventbus.TaskEvent{
+		TaskID:     taskID.String(),
+		WorkflowID: workflowID.String(),
+		Status:     string(normalizedStatus),
+		Message:    strings.TrimSpace(req.GetMessage()),
+	}
+
+	event, err := eventbus.NewEvent("task_status", taskEvent)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to build task event: %v", err)
+	}
+
+	if err := s.bus.Publish(ctx, eventbus.ChannelTask, event); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to publish task event: %v", err)
+	}
+
 	return &pb.UpdateStatusResponse{Success: true}, nil
 }
 
@@ -119,4 +167,19 @@ func (s *Server) StreamLogs(stream pb.TaskService_StreamLogsServer) error {
 
 func (s *Server) Register(server *grpc.Server) {
 	pb.RegisterTaskServiceServer(server, s)
+}
+
+func isValidTaskStatus(status model.TaskStatus) bool {
+	switch status {
+	case model.TaskPending,
+		model.TaskQueued,
+		model.TaskRunning,
+		model.TaskSucceeded,
+		model.TaskFailed,
+		model.TaskSkipped,
+		model.TaskRetrying:
+		return true
+	default:
+		return false
+	}
 }

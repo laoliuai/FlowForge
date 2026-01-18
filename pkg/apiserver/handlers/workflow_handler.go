@@ -308,13 +308,44 @@ func (h *WorkflowHandler) ListTasks(c *gin.Context) {
 }
 
 func (h *WorkflowHandler) StreamLogs(c *gin.Context) {
-	workflowID := c.Param("id")
-	if _, err := uuid.Parse(workflowID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid workflow id"})
+	taskIDStr := c.Param("task_id")
+	if _, err := uuid.Parse(taskIDStr); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid task id"})
 		return
 	}
 
-	c.JSON(http.StatusOK, []interface{}{})
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("Transfer-Encoding", "chunked")
+
+	// 1. Fetch historical/buffered logs first
+	// Note: We need a LogRepository here. For now assuming we can access via h.db
+	// In production code, inject LogRepository into Handler
+	logRepo := postgres.NewLogRepository(h.db.DB())
+	histLogs, err := logRepo.List(c.Request.Context(), taskIDStr, nil, 100)
+	if err == nil {
+		for _, log := range histLogs {
+			c.SSEvent("log", log)
+		}
+	}
+
+	// 2. Subscribe to Redis for real-time logs
+	channel := "logs:task:" + taskIDStr
+	pubsub := h.redis.Client().Subscribe(c.Request.Context(), channel)
+	defer pubsub.Close()
+
+	ch := pubsub.Channel()
+
+	for {
+		select {
+		case msg := <-ch:
+			c.SSEvent("log", msg.Payload)
+			c.Writer.Flush()
+		case <-c.Request.Context().Done():
+			return
+		}
+	}
 }
 
 func (h *WorkflowHandler) publishTaskCreatedEvents(ctx context.Context, tasks []*model.Task) {

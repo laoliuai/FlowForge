@@ -33,6 +33,20 @@ class Config:
     metric_flush_interval: float = 5.0
 
 
+class StdoutRedirector:
+    def __init__(self, client, original_stream, level="INFO"):
+        self.client = client
+        self.original_stream = original_stream
+        self.level = level
+
+    def write(self, message):
+        self.original_stream.write(message)
+        if message.strip():  # Avoid logging empty newlines
+            self.client.log(message.rstrip(), level=self.level)
+
+    def flush(self):
+        self.original_stream.flush()
+
 class FlowForgeClient:
     """
     FlowForge SDK Client for task status reporting, logging, and metrics.
@@ -75,6 +89,10 @@ class FlowForgeClient:
 
         # Register cleanup
         atexit.register(self.close)
+
+        # Redirect stdout/stderr
+        sys.stdout = StdoutRedirector(self, sys.stdout, "INFO")
+        sys.stderr = StdoutRedirector(self, sys.stderr, "ERROR")
 
     @classmethod
     def from_env(cls) -> "FlowForgeClient":
@@ -360,15 +378,23 @@ class FlowForgeClient:
             self._flush_logs(batch)
 
     def _flush_logs(self, batch: list):
-        """Send log batch to log aggregator."""
+        """Send log batch to gRPC StreamLogs."""
+        def request_generator():
+            for entry in batch:
+                yield flowforge_pb2.LogEntry(
+                    task_id=entry["task_id"],
+                    workflow_id=entry["workflow_id"],
+                    tenant_id=entry["tenant_id"],
+                    timestamp=int(datetime.fromisoformat(entry["timestamp"].rstrip("Z")).timestamp() * 1000),
+                    level=entry["level"],
+                    message=entry["message"],
+                    line_num=0  # Optional: track line numbers if needed
+                )
+        
         try:
-            self._http_session.post(
-                f"{self.config.log_endpoint}/v1/logs",
-                json={"logs": batch},
-                timeout=10,
-            )
-        except requests.RequestException as e:
-            print(f"[FlowForge] Failed to flush logs: {e}")
+            self._status_stub.StreamLogs(request_generator(), timeout=10)
+        except grpc.RpcError as e:
+            print(f"[FlowForge] Failed to flush logs via gRPC: {e}")
 
     def _metric_worker(self):
         """Batch and send metrics."""

@@ -1,0 +1,75 @@
+syntax = "proto3";
+
+package flowforge.v1;
+
+option go_package = "github.com/flowforge/flowforge/pkg/api/grpc/v1";
+
+// TaskService handles task status updates from SDK
+service TaskService {
+    rpc UpdateStatus(UpdateStatusRequest) returns (UpdateStatusResponse);
+    rpc SetOutput(SetOutputRequest) returns (SetOutputResponse);
+    rpc SaveCheckpoint(SaveCheckpointRequest) returns (SaveCheckpointResponse);
+    rpc GetCheckpoint(GetCheckpointRequest) returns (GetCheckpointResponse);
+    rpc StreamLogs(stream LogEntry) returns (StreamLogsResponse);
+}
+
+message UpdateStatusRequest {
+    string task_id = 1;
+    string workflow_id = 2;
+    string status = 3;
+    string message = 4;
+    int32 progress = 5;
+    string details = 6;  // JSON string
+    int64 timestamp = 7;
+}
+
+message UpdateStatusResponse {
+    bool success = 1;
+}
+
+message SetOutputRequest {
+    string task_id = 1;
+    string workflow_id = 2;
+    string key = 3;
+    string value = 4;  // JSON string
+}
+
+message SetOutputResponse {
+    bool success = 1;
+}
+
+message SaveCheckpointRequest {
+    string task_id = 1;
+    string workflow_id = 2;
+    string data = 3;  // JSON string
+    int64 timestamp = 4;
+}
+
+message SaveCheckpointResponse {
+    bool success = 1;
+}
+
+message GetCheckpointRequest {
+    string task_id = 1;
+    string workflow_id = 2;
+}
+
+message GetCheckpointResponse {
+    string data = 1;  // JSON string, empty if no checkpoint
+    int64 timestamp = 2;
+}
+
+message LogEntry {
+    string task_id = 1;
+    string workflow_id = 2;
+    string tenant_id = 3;
+    int64 timestamp = 4;
+    string level = 5;
+    string message = 6;
+    int32 line_num = 7;
+}
+
+message StreamLogsResponse {
+    int32 received = 1;
+    int32 processed = 2;
+}

@@ -40,6 +40,7 @@ func NewStore(cfg *config.DatabaseConfig) (*Store, error) {
 	return &Store{db: db}, nil
 }
 
+// DB returns the underlying gorm.DB connection
 func (s *Store) DB() *gorm.DB {
 	return s.db
 }
@@ -64,6 +65,7 @@ func (s *Store) AutoMigrate() error {
 		&model.Task{},
 		&model.TaskDependency{},
 		&model.TaskEvent{},
+		&model.LogEntry{},
 	)
 }
 

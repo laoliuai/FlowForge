@@ -3,9 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"math"
-	"strings"
 	"sync"
 	"time"
 
@@ -14,14 +12,12 @@ import (
 	"github.com/flowforge/flowforge/pkg/controller/dag"
 	"github.com/flowforge/flowforge/pkg/eventbus"
 	"github.com/flowforge/flowforge/pkg/model"
-	"github.com/flowforge/flowforge/pkg/queue"
 	"github.com/flowforge/flowforge/pkg/store/postgres"
 )
 
 type WorkflowController struct {
 	workflowRepo *postgres.WorkflowRepository
 	taskRepo     *postgres.TaskRepository
-	taskQueue    *queue.TaskQueue
 	bus          *eventbus.Bus
 	logger       *zap.Logger
 	parser       *dag.Parser
@@ -41,14 +37,12 @@ type workflowState struct {
 func NewWorkflowController(
 	workflowRepo *postgres.WorkflowRepository,
 	taskRepo *postgres.TaskRepository,
-	taskQueue *queue.TaskQueue,
 	bus *eventbus.Bus,
 	logger *zap.Logger,
 ) *WorkflowController {
 	return &WorkflowController{
 		workflowRepo:    workflowRepo,
 		taskRepo:        taskRepo,
-		taskQueue:       taskQueue,
 		bus:             bus,
 		logger:          logger,
 		parser:          dag.NewParser(),
@@ -123,105 +117,6 @@ func (c *WorkflowController) initWorkflowState(workflow *model.Workflow, tasks [
 
 func (c *WorkflowController) startWorkflow(ctx context.Context, workflowID string) error {
 	if err := c.workflowRepo.UpdateStatus(ctx, workflowID, model.WorkflowRunning, ""); err != nil {
-		return err
-	}
-
-	return c.scheduleReadyTasks(ctx, workflowID)
-}
-
-func (c *WorkflowController) scheduleReadyTasks(ctx context.Context, workflowID string) error {
-	c.mu.RLock()
-	state, ok := c.activeWorkflows[workflowID]
-	c.mu.RUnlock()
-	if !ok {
-		return fmt.Errorf("workflow %s not tracked", workflowID)
-	}
-
-	for _, task := range state.tasks {
-		if task.Status != model.TaskPending {
-			continue
-		}
-
-		if !c.allDependenciesSatisfied(task, state) {
-			continue
-		}
-
-		if task.WhenCondition != "" && !c.evaluateCondition(task.WhenCondition, state) {
-			if err := c.skipTask(ctx, task); err != nil {
-				c.logger.Error("failed to skip task", zap.String("task_id", task.ID.String()), zap.Error(err))
-			}
-			continue
-		}
-
-		if err := c.queueTask(ctx, task); err != nil {
-			c.logger.Error("failed to queue task", zap.String("task_id", task.ID.String()), zap.Error(err))
-		}
-	}
-
-	return nil
-}
-
-func (c *WorkflowController) allDependenciesSatisfied(task *model.Task, state *workflowState) bool {
-	for _, dep := range task.Dependencies {
-		depTask, ok := state.tasks[dep.DependsOnID.String()]
-		if !ok {
-			return false
-		}
-
-		switch dep.Type {
-		case "success":
-			if depTask.Status != model.TaskSucceeded {
-				return false
-			}
-		case "completion":
-			if depTask.Status != model.TaskSucceeded && depTask.Status != model.TaskFailed && depTask.Status != model.TaskSkipped {
-				return false
-			}
-		case "failure":
-			if depTask.Status != model.TaskFailed {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-func (c *WorkflowController) skipTask(ctx context.Context, task *model.Task) error {
-	now := time.Now()
-	updates := map[string]interface{}{
-		"finished_at": &now,
-	}
-	if err := c.taskRepo.UpdateStatus(ctx, task.ID.String(), model.TaskSkipped, updates); err != nil {
-		return err
-	}
-
-	c.updateTaskState(task, model.TaskSkipped)
-	return nil
-}
-
-func (c *WorkflowController) queueTask(ctx context.Context, task *model.Task) error {
-	now := time.Now()
-	updates := map[string]interface{}{
-		"queued_at": &now,
-	}
-	if err := c.taskRepo.UpdateStatus(ctx, task.ID.String(), model.TaskQueued, updates); err != nil {
-		return err
-	}
-
-	task.Status = model.TaskQueued
-	task.QueuedAt = &now
-	c.updateTaskState(task, model.TaskQueued)
-
-	if err := c.taskQueue.Enqueue(ctx, task); err != nil {
-		rollback := map[string]interface{}{
-			"queued_at": nil,
-		}
-		if rollbackErr := c.taskRepo.UpdateStatus(ctx, task.ID.String(), model.TaskPending, rollback); rollbackErr != nil {
-			c.logger.Error("failed to rollback queued task status", zap.String("task_id", task.ID.String()), zap.Error(rollbackErr))
-		}
-		task.Status = model.TaskPending
-		task.QueuedAt = nil
-		c.updateTaskState(task, model.TaskPending)
 		return err
 	}
 
@@ -302,10 +197,6 @@ func (c *WorkflowController) HandleTaskUpdate(ctx context.Context, taskID string
 	}
 
 	c.updateTaskState(task, status)
-
-	if status == model.TaskSucceeded || status == model.TaskSkipped || status == model.TaskFailed {
-		_ = c.scheduleReadyTasks(ctx, task.WorkflowID.String())
-	}
 
 	c.checkWorkflowCompletion(ctx, task.WorkflowID.String())
 	return nil
@@ -403,9 +294,6 @@ func (c *WorkflowController) reconcile(ctx context.Context) {
 
 	for _, workflowID := range c.activeWorkflowIDs() {
 		c.refreshWorkflowState(ctx, workflowID)
-		if err := c.scheduleReadyTasks(ctx, workflowID); err != nil {
-			c.logger.Error("failed to schedule ready tasks", zap.String("workflow_id", workflowID), zap.Error(err))
-		}
 		c.checkWorkflowCompletion(ctx, workflowID)
 	}
 }
@@ -510,74 +398,6 @@ func (c *WorkflowController) refreshWorkflowState(ctx context.Context, workflowI
 			state.pending++
 		}
 	}
-}
-
-func (c *WorkflowController) evaluateCondition(condition string, state *workflowState) bool {
-	trimmed := strings.TrimSpace(condition)
-	if trimmed == "" || trimmed == "true" {
-		return true
-	}
-	if trimmed == "false" {
-		return false
-	}
-
-	parts := strings.Split(trimmed, "==")
-	if len(parts) != 2 {
-		return true
-	}
-	left := strings.TrimSpace(parts[0])
-	right := strings.TrimSpace(parts[1])
-
-	expected := strings.EqualFold(right, "true")
-	if strings.EqualFold(right, "false") {
-		expected = false
-	}
-
-	value, ok := resolveOutputValue(left, state)
-	if !ok {
-		return false
-	}
-
-	boolValue, ok := value.(bool)
-	if ok {
-		return boolValue == expected
-	}
-
-	stringValue, ok := value.(string)
-	if ok {
-		return strings.EqualFold(stringValue, right)
-	}
-
-	return false
-}
-
-func resolveOutputValue(expression string, state *workflowState) (interface{}, bool) {
-	trimmed := strings.TrimPrefix(expression, "{{")
-	trimmed = strings.TrimSuffix(trimmed, "}}")
-	trimmed = strings.TrimSpace(trimmed)
-
-	parts := strings.Split(trimmed, ".")
-	if len(parts) < 4 {
-		return nil, false
-	}
-	if parts[0] != "tasks" || parts[2] != "outputs" {
-		return nil, false
-	}
-
-	taskName := parts[1]
-	outputKey := parts[3]
-
-	for _, task := range state.tasks {
-		if task.Name == taskName {
-			if task.Outputs == nil {
-				return nil, false
-			}
-			value, ok := task.Outputs[outputKey]
-			return value, ok
-		}
-	}
-
-	return nil, false
 }
 
 func (c *WorkflowController) checkWorkflowCompletion(ctx context.Context, workflowID string) {

@@ -13,6 +13,7 @@ import (
 
 	pb "github.com/flowforge/flowforge/pkg/api/proto"
 	"github.com/flowforge/flowforge/pkg/model"
+	"github.com/flowforge/flowforge/pkg/store"
 	"github.com/flowforge/flowforge/pkg/store/postgres"
 	redisclient "github.com/flowforge/flowforge/pkg/store/redis"
 )
@@ -22,15 +23,15 @@ type Server struct {
 	db      *postgres.Store
 	redis   *redisclient.Client
 	logger  *zap.Logger
-	logRepo *postgres.LogRepository
+	logRepo store.LogStore
 }
 
-func NewServer(db *postgres.Store, redis *redisclient.Client, logger *zap.Logger) *Server {
+func NewServer(db *postgres.Store, redis *redisclient.Client, logRepo store.LogStore, logger *zap.Logger) *Server {
 	return &Server{
 		db:      db,
 		redis:   redis,
 		logger:  logger,
-		logRepo: postgres.NewLogRepository(db.DB()),
+		logRepo: logRepo,
 	}
 }
 

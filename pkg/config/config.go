@@ -65,8 +65,9 @@ type AuthConfig struct {
 }
 
 type LoggingConfig struct {
-	Level  string `mapstructure:"level"`
-	Format string `mapstructure:"format"` // json or console
+	Level         string `mapstructure:"level"`
+	Format        string `mapstructure:"format"` // json or console
+	StorageDriver string `mapstructure:"storage_driver"` // postgres or clickhouse
 }
 
 func Load() (*Config, error) {
@@ -89,6 +90,7 @@ func Load() (*Config, error) {
 	viper.SetDefault("auth.task_token_ttl", "24h")
 	viper.SetDefault("logging.level", "info")
 	viper.SetDefault("logging.format", "json")
+	viper.SetDefault("logging.storage_driver", "postgres")
 
 	if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {

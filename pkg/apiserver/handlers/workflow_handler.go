@@ -14,18 +14,20 @@ import (
 	"github.com/flowforge/flowforge/pkg/controller/dag"
 	"github.com/flowforge/flowforge/pkg/eventbus"
 	"github.com/flowforge/flowforge/pkg/model"
+	"github.com/flowforge/flowforge/pkg/store"
 	"github.com/flowforge/flowforge/pkg/store/postgres"
 	redisclient "github.com/flowforge/flowforge/pkg/store/redis"
 )
 
 type WorkflowHandler struct {
-	db     *postgres.Store
-	redis  *redisclient.Client
-	logger *zap.Logger
+	db      *postgres.Store
+	redis   *redisclient.Client
+	logRepo store.LogStore
+	logger  *zap.Logger
 }
 
-func NewWorkflowHandler(db *postgres.Store, redis *redisclient.Client, logger *zap.Logger) *WorkflowHandler {
-	return &WorkflowHandler{db: db, redis: redis, logger: logger}
+func NewWorkflowHandler(db *postgres.Store, redis *redisclient.Client, logRepo store.LogStore, logger *zap.Logger) *WorkflowHandler {
+	return &WorkflowHandler{db: db, redis: redis, logRepo: logRepo, logger: logger}
 }
 
 type workflowCreateRequest struct {
@@ -320,10 +322,8 @@ func (h *WorkflowHandler) StreamLogs(c *gin.Context) {
 	c.Writer.Header().Set("Transfer-Encoding", "chunked")
 
 	// 1. Fetch historical/buffered logs first
-	// Note: We need a LogRepository here. For now assuming we can access via h.db
-	// In production code, inject LogRepository into Handler
-	logRepo := postgres.NewLogRepository(h.db.DB())
-	histLogs, err := logRepo.List(c.Request.Context(), taskIDStr, nil, 100)
+	// Use the injected logRepo instead of creating a new one
+	histLogs, err := h.logRepo.List(c.Request.Context(), taskIDStr, nil, 100)
 	if err == nil {
 		for _, log := range histLogs {
 			c.SSEvent("log", log)

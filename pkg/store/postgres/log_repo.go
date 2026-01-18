@@ -48,3 +48,9 @@ func (r *LogRepository) DeleteOldLogs(ctx context.Context, retentionDays int) er
 		Where("created_at < ?", cutoff).
 		Delete(&model.LogEntry{}).Error
 }
+
+func (r *LogRepository) Close() error {
+	// GORM manages connection pooling, so typically we don't close it explicitly here
+	// unless we want to close the underlying sql.DB
+	return nil
+}

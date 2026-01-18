@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/flowforge/flowforge/pkg/model"
+	"github.com/flowforge/flowforge/pkg/store"
 )
 
 type ClickHouseLogStore struct {
@@ -96,6 +97,79 @@ func (s *ClickHouseLogStore) List(ctx context.Context, taskID string, sinceTime 
 	}
 
 	rows, err := s.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var logs []model.LogEntry
+	for rows.Next() {
+		var log model.LogEntry
+		if err := rows.Scan(
+			&log.TaskID,
+			&log.WorkflowID,
+			&log.Timestamp,
+			&log.Level,
+			&log.Message,
+			&log.LineNum,
+		); err != nil {
+			return nil, err
+		}
+		logs = append(logs, log)
+	}
+
+	return logs, nil
+}
+
+func (s *ClickHouseLogStore) Query(ctx context.Context, query store.LogQuery) ([]model.LogEntry, error) {
+	if query.WorkflowID == "" {
+		return nil, fmt.Errorf("workflow id is required")
+	}
+
+	workflowUUID, err := uuid.Parse(query.WorkflowID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid workflow id: %w", err)
+	}
+
+	queryText := "SELECT task_id, workflow_id, timestamp, level, message, line_num FROM task_logs WHERE workflow_id = ?"
+	args := []interface{}{workflowUUID}
+
+	if query.TaskID != "" {
+		taskUUID, err := uuid.Parse(query.TaskID)
+		if err != nil {
+			return nil, fmt.Errorf("invalid task id: %w", err)
+		}
+		queryText += " AND task_id = ?"
+		args = append(args, taskUUID)
+	}
+
+	if query.StartTime != nil {
+		queryText += " AND timestamp >= ?"
+		args = append(args, *query.StartTime)
+	}
+
+	if query.EndTime != nil {
+		queryText += " AND timestamp <= ?"
+		args = append(args, *query.EndTime)
+	}
+
+	if query.Level != "" {
+		queryText += " AND level = ?"
+		args = append(args, query.Level)
+	}
+
+	if query.Search != "" {
+		queryText += " AND message LIKE ?"
+		args = append(args, "%"+query.Search+"%")
+	}
+
+	queryText += " ORDER BY timestamp ASC, line_num ASC"
+
+	if query.Limit > 0 {
+		queryText += fmt.Sprintf(" LIMIT %d", query.Limit)
+	}
+
+	rows, err := s.conn.Query(ctx, queryText, args...)
 	if err != nil {
 		return nil, err
 	}

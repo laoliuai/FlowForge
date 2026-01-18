@@ -15,9 +15,23 @@ type LogStore interface {
 	// List retrieves logs for a specific task with pagination
 	List(ctx context.Context, taskID string, sinceTime *time.Time, limit int) ([]model.LogEntry, error)
 
+	// Query retrieves logs with workflow/task/time filtering
+	Query(ctx context.Context, query LogQuery) ([]model.LogEntry, error)
+
 	// DeleteOldLogs deletes logs older than the specified retention period (if backend requires it)
 	DeleteOldLogs(ctx context.Context, retentionDays int) error
 
 	// Close closes the connection to the storage backend
 	Close() error
+}
+
+// LogQuery describes filters for querying logs
+type LogQuery struct {
+	WorkflowID string
+	TaskID     string
+	StartTime  *int64
+	EndTime    *int64
+	Level      string
+	Search     string
+	Limit      int
 }

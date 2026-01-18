@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -75,6 +76,7 @@ func (fs *FairScheduler) Schedule(ctx context.Context) error {
 		return err
 	}
 
+	workflowTasksByName := make(map[string]map[string]*model.Task)
 	gangsByKey := make(map[string]*SchedulableGang)
 	readyGang := make(map[string]bool)
 	for i := range pendingTasks {
@@ -94,6 +96,21 @@ func (fs *FairScheduler) Schedule(ctx context.Context) error {
 		if !dependenciesSatisfied(task, dependencyStatus) {
 			readyGang[gangKey] = false
 			continue
+		}
+
+		if task.WhenCondition != "" {
+			tasksByName, err := fs.getWorkflowTasksByName(ctx, workflowTasksByName, task.WorkflowID)
+			if err != nil {
+				fs.logger.Warn("failed to load workflow tasks for condition evaluation", zap.String("workflow_id", task.WorkflowID.String()), zap.Error(err))
+				readyGang[gangKey] = false
+				continue
+			}
+			if !evaluateCondition(task.WhenCondition, tasksByName) {
+				if err := fs.skipTask(ctx, task); err != nil {
+					fs.logger.Warn("failed to skip task", zap.String("task_id", task.ID.String()), zap.Error(err))
+				}
+				continue
+			}
 		}
 
 		project := task.Workflow.Project
@@ -169,6 +186,30 @@ func (fs *FairScheduler) Schedule(ctx context.Context) error {
 	return nil
 }
 
+func (fs *FairScheduler) getWorkflowTasksByName(
+	ctx context.Context,
+	cache map[string]map[string]*model.Task,
+	workflowID uuid.UUID,
+) (map[string]*model.Task, error) {
+	workflowKey := workflowID.String()
+	if tasksByName, ok := cache[workflowKey]; ok {
+		return tasksByName, nil
+	}
+
+	tasks, err := fs.taskRepo.ListByWorkflowID(ctx, workflowKey)
+	if err != nil {
+		return nil, err
+	}
+
+	tasksByName := make(map[string]*model.Task, len(tasks))
+	for i := range tasks {
+		tasksByName[tasks[i].Name] = &tasks[i]
+	}
+	cache[workflowKey] = tasksByName
+
+	return tasksByName, nil
+}
+
 func (fs *FairScheduler) calculateGangPriority(ctx context.Context, gang *SchedulableGang) float64 {
 	basePriority := 0.0
 	if len(gang.Tasks) > 0 && gang.Tasks[0].Workflow != nil {
@@ -242,6 +283,22 @@ func (fs *FairScheduler) queueGangTasks(ctx context.Context, tasks []*model.Task
 	return nil
 }
 
+func (fs *FairScheduler) skipTask(ctx context.Context, task *model.Task) error {
+	now := time.Now()
+	updates := map[string]interface{}{
+		"finished_at": &now,
+	}
+	if err := fs.taskRepo.UpdateStatus(ctx, task.ID.String(), model.TaskSkipped, updates); err != nil {
+		return err
+	}
+
+	task.Status = model.TaskSkipped
+	task.FinishedAt = &now
+	fs.publishTaskStatus(ctx, task, model.TaskSkipped)
+
+	return nil
+}
+
 func (fs *FairScheduler) resetQueuedTasks(ctx context.Context, tasks []*model.Task) {
 	for _, task := range tasks {
 		_ = fs.taskRepo.UpdateStatus(ctx, task.ID.String(), model.TaskPending, map[string]interface{}{
@@ -299,6 +356,72 @@ func dependenciesSatisfied(task *model.Task, statuses map[uuid.UUID]model.TaskSt
 	return true
 }
 
+func evaluateCondition(condition string, tasksByName map[string]*model.Task) bool {
+	trimmed := strings.TrimSpace(condition)
+	if trimmed == "" || trimmed == "true" {
+		return true
+	}
+	if trimmed == "false" {
+		return false
+	}
+
+	parts := strings.Split(trimmed, "==")
+	if len(parts) != 2 {
+		return true
+	}
+	left := strings.TrimSpace(parts[0])
+	right := strings.TrimSpace(parts[1])
+
+	expected := strings.EqualFold(right, "true")
+	if strings.EqualFold(right, "false") {
+		expected = false
+	}
+
+	value, ok := resolveOutputValue(left, tasksByName)
+	if !ok {
+		return false
+	}
+
+	boolValue, ok := value.(bool)
+	if ok {
+		return boolValue == expected
+	}
+
+	stringValue, ok := value.(string)
+	if ok {
+		return strings.EqualFold(stringValue, right)
+	}
+
+	return false
+}
+
+func resolveOutputValue(expression string, tasksByName map[string]*model.Task) (interface{}, bool) {
+	trimmed := strings.TrimPrefix(expression, "{{")
+	trimmed = strings.TrimSuffix(trimmed, "}}")
+	trimmed = strings.TrimSpace(trimmed)
+
+	parts := strings.Split(trimmed, ".")
+	if len(parts) < 4 {
+		return nil, false
+	}
+	if parts[0] != "tasks" || parts[2] != "outputs" {
+		return nil, false
+	}
+
+	taskName := parts[1]
+	outputKey := parts[3]
+
+	task, ok := tasksByName[taskName]
+	if !ok {
+		return nil, false
+	}
+	if task.Outputs == nil {
+		return nil, false
+	}
+	value, ok := task.Outputs[outputKey]
+	return value, ok
+}
+
 func (fs *FairScheduler) publishTaskQueued(ctx context.Context, task *model.Task) {
 	taskEvent := eventbus.TaskEvent{
 		TaskID:     task.ID.String(),
@@ -306,6 +429,17 @@ func (fs *FairScheduler) publishTaskQueued(ctx context.Context, task *model.Task
 		Status:     string(model.TaskQueued),
 	}
 	if event, err := eventbus.NewEvent("task_queued", taskEvent); err == nil {
+		_ = fs.bus.Publish(ctx, eventbus.ChannelTask, event)
+	}
+}
+
+func (fs *FairScheduler) publishTaskStatus(ctx context.Context, task *model.Task, status model.TaskStatus) {
+	taskEvent := eventbus.TaskEvent{
+		TaskID:     task.ID.String(),
+		WorkflowID: task.WorkflowID.String(),
+		Status:     string(status),
+	}
+	if event, err := eventbus.NewEvent("task_status", taskEvent); err == nil {
 		_ = fs.bus.Publish(ctx, eventbus.ChannelTask, event)
 	}
 }

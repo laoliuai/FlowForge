@@ -46,6 +46,28 @@ func (e *PodExecutor) ExecuteTask(ctx context.Context, task *model.Task, tenantI
 	return created, nil
 }
 
+func (e *PodExecutor) ExecuteTaskInNamespace(ctx context.Context, task *model.Task, tenantID, projectID, namespace string) (*corev1.Pod, error) {
+	targetNamespace := namespace
+	if targetNamespace == "" {
+		targetNamespace = e.namespace
+	}
+	if targetNamespace == "" {
+		targetNamespace = "default"
+	}
+
+	pod := e.buildPod(task, tenantID, projectID, targetNamespace)
+
+	created, err := e.k8sClient.CoreV1().Pods(targetNamespace).Create(ctx, pod, metav1.CreateOptions{})
+	if err != nil {
+		if errors.IsAlreadyExists(err) {
+			return e.k8sClient.CoreV1().Pods(targetNamespace).Get(ctx, pod.Name, metav1.GetOptions{})
+		}
+		return nil, fmt.Errorf("failed to create pod: %w", err)
+	}
+
+	return created, nil
+}
+
 func (e *PodExecutor) buildPod(task *model.Task, tenantID, projectID, namespace string) *corev1.Pod {
 	podName := fmt.Sprintf("ff-%s-%s", task.WorkflowID.String()[:8], task.Name)
 

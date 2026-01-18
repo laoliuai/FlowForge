@@ -11,6 +11,7 @@ import (
 	"github.com/flowforge/flowforge/pkg/config"
 	"github.com/flowforge/flowforge/pkg/controller"
 	"github.com/flowforge/flowforge/pkg/eventbus"
+	"github.com/flowforge/flowforge/pkg/queue"
 	"github.com/flowforge/flowforge/pkg/store/postgres"
 	redisclient "github.com/flowforge/flowforge/pkg/store/redis"
 )
@@ -38,9 +39,10 @@ func main() {
 
 	workflowRepo := postgres.NewWorkflowRepository(db.DB())
 	taskRepo := postgres.NewTaskRepository(db.DB())
+	taskQueue := queue.NewTaskQueue(redis.Client(), "flowforge:tasks")
 	bus := eventbus.NewBus(redis.Client())
 
-	controller := controller.NewWorkflowController(workflowRepo, taskRepo, bus, logger)
+	controller := controller.NewWorkflowController(workflowRepo, taskRepo, taskQueue, bus, logger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

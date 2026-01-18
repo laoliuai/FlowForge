@@ -7,6 +7,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/flowforge/flowforge/pkg/model"
+	"github.com/flowforge/flowforge/pkg/store"
 )
 
 type LogRepository struct {
@@ -39,6 +40,44 @@ func (r *LogRepository) List(ctx context.Context, taskID string, sinceTime *time
 	}
 
 	err := query.Find(&logs).Error
+	return logs, err
+}
+
+func (r *LogRepository) Query(ctx context.Context, query store.LogQuery) ([]model.LogEntry, error) {
+	if query.WorkflowID == "" {
+		return nil, gorm.ErrInvalidValue
+	}
+
+	var logs []model.LogEntry
+	dbQuery := r.db.WithContext(ctx).
+		Where("workflow_id = ?", query.WorkflowID).
+		Order("timestamp ASC, line_num ASC")
+
+	if query.TaskID != "" {
+		dbQuery = dbQuery.Where("task_id = ?", query.TaskID)
+	}
+
+	if query.StartTime != nil {
+		dbQuery = dbQuery.Where("timestamp >= ?", *query.StartTime)
+	}
+
+	if query.EndTime != nil {
+		dbQuery = dbQuery.Where("timestamp <= ?", *query.EndTime)
+	}
+
+	if query.Level != "" {
+		dbQuery = dbQuery.Where("level = ?", query.Level)
+	}
+
+	if query.Search != "" {
+		dbQuery = dbQuery.Where("message ILIKE ?", "%"+query.Search+"%")
+	}
+
+	if query.Limit > 0 {
+		dbQuery = dbQuery.Limit(query.Limit)
+	}
+
+	err := dbQuery.Find(&logs).Error
 	return logs, err
 }
 

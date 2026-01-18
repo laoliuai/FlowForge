@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -309,43 +310,114 @@ func (h *WorkflowHandler) ListTasks(c *gin.Context) {
 	c.JSON(http.StatusOK, response)
 }
 
-func (h *WorkflowHandler) StreamLogs(c *gin.Context) {
-	taskIDStr := c.Param("task_id")
-	if _, err := uuid.Parse(taskIDStr); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid task id"})
+func (h *WorkflowHandler) GetLogs(c *gin.Context) {
+	workflowID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid workflow id"})
 		return
 	}
 
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.Header().Set("Cache-Control", "no-cache")
-	c.Writer.Header().Set("Connection", "keep-alive")
-	c.Writer.Header().Set("Transfer-Encoding", "chunked")
+	follow, err := strconv.ParseBool(c.DefaultQuery("follow", "false"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid follow flag"})
+		return
+	}
 
-	// 1. Fetch historical/buffered logs first
-	// Use the injected logRepo instead of creating a new one
-	histLogs, err := h.logRepo.List(c.Request.Context(), taskIDStr, nil, 100)
-	if err == nil {
+	taskIDStr := strings.TrimSpace(c.Query("task_id"))
+	level := strings.TrimSpace(c.Query("level"))
+	search := strings.TrimSpace(c.Query("search"))
+
+	startTimeStr := strings.TrimSpace(c.Query("start_time"))
+	endTimeStr := strings.TrimSpace(c.Query("end_time"))
+	limitStr := strings.TrimSpace(c.Query("limit"))
+
+	var startTime *int64
+	if startTimeStr != "" {
+		value, err := strconv.ParseInt(startTimeStr, 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid start_time"})
+			return
+		}
+		startTime = &value
+	}
+
+	var endTime *int64
+	if endTimeStr != "" {
+		value, err := strconv.ParseInt(endTimeStr, 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid end_time"})
+			return
+		}
+		endTime = &value
+	}
+
+	limit := 100
+	if limitStr != "" {
+		value, err := strconv.Atoi(limitStr)
+		if err != nil || value <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid limit"})
+			return
+		}
+		limit = value
+	}
+
+	query := store.LogQuery{
+		WorkflowID: workflowID.String(),
+		TaskID:     taskIDStr,
+		StartTime:  startTime,
+		EndTime:    endTime,
+		Level:      level,
+		Search:     search,
+		Limit:      limit,
+	}
+
+	if follow {
+		if taskIDStr == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "task_id is required for follow mode"})
+			return
+		}
+
+		c.Writer.Header().Set("Content-Type", "text/event-stream")
+		c.Writer.Header().Set("Cache-Control", "no-cache")
+		c.Writer.Header().Set("Connection", "keep-alive")
+		c.Writer.Header().Set("Transfer-Encoding", "chunked")
+
+		histLogs, err := h.logRepo.Query(c.Request.Context(), query)
+		if err != nil {
+			h.logger.Error("failed to query historical logs", zap.Error(err))
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query logs"})
+			return
+		}
+
 		for _, log := range histLogs {
 			c.SSEvent("log", log)
 		}
-	}
 
-	// 2. Subscribe to Redis for real-time logs
-	channel := "logs:task:" + taskIDStr
-	pubsub := h.redis.Client().Subscribe(c.Request.Context(), channel)
-	defer pubsub.Close()
+		channel := "logs:task:" + taskIDStr
+		pubsub := h.redis.Client().Subscribe(c.Request.Context(), channel)
+		defer pubsub.Close()
 
-	ch := pubsub.Channel()
+		ch := pubsub.Channel()
 
-	for {
-		select {
-		case msg := <-ch:
-			c.SSEvent("log", msg.Payload)
-			c.Writer.Flush()
-		case <-c.Request.Context().Done():
-			return
+		for {
+			select {
+			case msg := <-ch:
+				c.SSEvent("log", msg.Payload)
+				c.Writer.Flush()
+			case <-c.Request.Context().Done():
+				return
+			}
 		}
 	}
+
+	logs, err := h.logRepo.Query(c.Request.Context(), query)
+	if err != nil {
+		h.logger.Error("failed to query logs", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query logs"})
+		return
+	}
+
+	c.JSON(http.StatusOK, logs)
 }
 
 func (h *WorkflowHandler) publishTaskCreatedEvents(ctx context.Context, tasks []*model.Task) {

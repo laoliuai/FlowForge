@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -190,6 +191,40 @@ func (r *TaskRepository) GetPendingTasks(ctx context.Context, workflowID string)
 		Where("workflow_id = ? AND status = ?", workflowID, model.TaskPending).
 		Find(&tasks).Error
 	return tasks, err
+}
+
+func (r *TaskRepository) GetPendingTasksForScheduling(ctx context.Context) ([]model.Task, error) {
+	var tasks []model.Task
+	err := r.db.WithContext(ctx).
+		Preload("Dependencies").
+		Preload("Workflow").
+		Preload("Workflow.Project").
+		Preload("Workflow.Project.Group").
+		Preload("Workflow.Project.Group.Tenant").
+		Where("status = ?", model.TaskPending).
+		Find(&tasks).Error
+	return tasks, err
+}
+
+func (r *TaskRepository) GetDependencyStatuses(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]model.TaskStatus, error) {
+	statuses := make(map[uuid.UUID]model.TaskStatus)
+	if len(ids) == 0 {
+		return statuses, nil
+	}
+
+	var tasks []model.Task
+	if err := r.db.WithContext(ctx).
+		Select("id", "status").
+		Where("id IN ?", ids).
+		Find(&tasks).Error; err != nil {
+		return nil, err
+	}
+
+	for _, task := range tasks {
+		statuses[task.ID] = task.Status
+	}
+
+	return statuses, nil
 }
 
 func (r *TaskRepository) GetRetryableTasks(ctx context.Context) ([]model.Task, error) {

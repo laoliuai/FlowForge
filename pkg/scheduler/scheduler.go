@@ -14,13 +14,14 @@ import (
 )
 
 type Scheduler struct {
-	workflowRepo *postgres.WorkflowRepository
-	taskRepo     *postgres.TaskRepository
-	queue        *queue.TaskQueue
-	quotaManager *quota.Manager
-	bus          *eventbus.Bus
-	logger       *zap.Logger
-	interval     time.Duration
+	workflowRepo  *postgres.WorkflowRepository
+	taskRepo      *postgres.TaskRepository
+	queue         *queue.TaskQueue
+	quotaManager  *quota.Manager
+	bus           *eventbus.Bus
+	logger        *zap.Logger
+	interval      time.Duration
+	fairScheduler *FairScheduler
 }
 
 func NewScheduler(
@@ -32,13 +33,14 @@ func NewScheduler(
 	logger *zap.Logger,
 ) *Scheduler {
 	return &Scheduler{
-		workflowRepo: workflowRepo,
-		taskRepo:     taskRepo,
-		queue:        queue,
-		quotaManager: quotaManager,
-		bus:          bus,
-		logger:       logger,
-		interval:     time.Second,
+		workflowRepo:  workflowRepo,
+		taskRepo:      taskRepo,
+		queue:         queue,
+		quotaManager:  quotaManager,
+		bus:           bus,
+		logger:        logger,
+		interval:      time.Second,
+		fairScheduler: NewFairScheduler(taskRepo, queue, quotaManager, bus, logger),
 	}
 }
 
@@ -57,28 +59,8 @@ func (s *Scheduler) Run(ctx context.Context) {
 }
 
 func (s *Scheduler) schedule(ctx context.Context) {
-	pendingTasks, err := s.taskRepo.GetPendingTasks(ctx, "")
-	if err != nil {
-		s.logger.Error("failed to load pending tasks", zap.Error(err))
-		return
-	}
-
-	for _, task := range pendingTasks {
-		if ok := s.quotaManager.CanScheduleTask(ctx, &task); !ok {
-			continue
-		}
-		if err := s.queue.Enqueue(ctx, &task); err != nil {
-			s.logger.Error("failed to enqueue task", zap.Error(err))
-			continue
-		}
-		taskEvent := eventbus.TaskEvent{
-			TaskID:     task.ID.String(),
-			WorkflowID: task.WorkflowID.String(),
-			Status:     string(model.TaskQueued),
-		}
-		if event, err := eventbus.NewEvent("task_queued", taskEvent); err == nil {
-			_ = s.bus.Publish(ctx, eventbus.ChannelTask, event)
-		}
+	if err := s.fairScheduler.Schedule(ctx); err != nil {
+		s.logger.Error("failed to run fair scheduler", zap.Error(err))
 	}
 }
 

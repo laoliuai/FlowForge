@@ -1,4 +1,4 @@
-# 可靠事件与调度队列设计
+# 可靠事件与调度队列设计（Kafka 版）
 
 ## 1. 目标
 - 为工作流状态变更与调度事件提供持久化、可重放的投递机制。
@@ -10,8 +10,8 @@
 ```
 Controller/Executor
   ├─(DB tx)─> State Update + Outbox Row
-  └────────> Outbox Relay -> Redis Streams (durable)
-                         └> Redis Pub/Sub (hot path, optional)
+  └────────> Outbox Relay -> Kafka Topics (durable)
+                         └> Optional Realtime Fanout (WebSocket/Cache)
 ```
 
 ## 3. Outbox 设计
@@ -30,24 +30,26 @@ CREATE TABLE workflow_events (
 
 ### 3.2 发布流程
 1. 控制器在事务内写入业务状态与 outbox。
-2. Relay 扫描 `status=pending`，写入 Redis Streams，并更新 `published_at`。
-3. 失败事件进入 DLQ 以便人工排查。
+2. Relay 扫描 `status=pending`，写入 Kafka 事件 Topic，并更新 `published_at`。
+3. 失败事件进入 Kafka DLQ Topic 以便人工排查。
 
-## 4. Redis Streams + 消费者
+## 4. Kafka Topics + 消费者
 
-- 使用 consumer group 提供 ACK 与重试。
+- 使用 consumer group 提供 ACK（offset commit）与重试策略。
 - 消费者记录 `event_id` 去重，确保幂等。
-- 未确认的消息通过 `XCLAIM` 重新分配给健康消费者。
+- 未确认的消息通过 consumer group rebalancing 重新分配给健康消费者。
+- 失败消息进入 retry topic 或 DLQ topic 以实现延迟重试与人工回溯。
 
 ## 5. 任务队列的可靠性
 
-- Dequeue 使用原子操作，将任务移入 `processing` 与 `heartbeat`。
-- 任务执行过程中更新心跳，超时自动回收并重入队列。
-- 失败任务进入 `retry:scheduled` 或 DLQ。
+- 任务队列采用 Kafka Topic（独立于事件总线）。
+- 消费者在执行完成后提交 offset，确保“至少一次”投递语义。
+- 引入 `retry topic` 与 `dlq topic`，按 backoff 策略延迟重试。
+- 执行器需上报心跳或超时检测，避免任务执行失败后长期占用配额。
 
 ## 6. 可观测性
 
-- 监控指标：outbox backlog、stream lag、DLQ size、retry requeue rate。
+- 监控指标：outbox backlog、topic lag、DLQ size、retry requeue rate。
 - Relay 组件需暴露关键运行指标：扫描批次大小、每批处理耗时、发布失败率、重试次数、consumer ACK 延迟。
-- 告警建议：outbox backlog 持续增长、stream lag 超过阈值、DLQ size 突增。
+- 告警建议：outbox backlog 持续增长、topic lag 超过阈值、DLQ size 突增。
 - 每类事件带 `trace_id`，便于端到端追踪。

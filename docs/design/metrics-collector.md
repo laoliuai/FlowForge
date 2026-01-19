@@ -71,6 +71,21 @@ Collector 也会暴露自身运行指标，便于运维监控：
 - 标签名会被转为小写并替换非法字符为 `_`。
 - 如标签名冲突，Collector 会自动追加后缀（例如 `_2`）。
 
+## 标签基数与限额控制
+
+为避免 Prometheus 发生高基数内存爆炸，Collector 对自定义指标执行以下约束：
+
+- **标签白名单**：默认仅允许 `region`、`env`、`batch` 等预定义标签，其他标签会被丢弃或拒绝。
+- **单指标标签数量上限**：例如最多 8 个标签键。
+- **标签值限制**：对于高动态字段（如 `task_id`、`workflow_id`），默认禁止进入标签；必要时通过 hash/采样方式降基数。
+- **租户级配额**：按 tenant 统计 label cardinality，超过阈值时返回 `partial` 并记录 `invalid_total` 原因。
+
+## Sidecar 与 Collector 的鉴权
+
+- **短期令牌**：SDK/Sidecar 调用 `/v1/metrics` 时携带 task token（scope: `metrics:write`）。
+- **mTLS（可选）**：Collector 与 Sidecar/SDK 间可启用 mTLS，防止跨租户伪造写入。
+- **最小权限**：Collector 仅接受与 token 中 `tenant_id`/`project_id` 匹配的指标。
+
 ## Docker 镜像构建
 
 Metrics Collector 可单独打包为 Docker 镜像，使用项目根目录提供的 Dockerfile：

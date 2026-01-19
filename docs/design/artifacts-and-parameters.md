@@ -71,7 +71,29 @@ parameter:
 - `POST /api/v1/workflows/{id}/artifacts` 注册 artifact 元数据
 - `GET /api/v1/workflows/{id}/artifacts?task_id=...`
 
+### 7.3 数据传递与模板注入
+
+为了让下游任务自动感知上游产物，FlowForge 在运行时提供变量解析与模板注入机制：
+
+```yaml
+tasks:
+  - id: train
+    outputs:
+      artifacts:
+        - name: model
+          path: /mnt/models/latest.bin
+  - id: eval
+    inputs:
+      artifacts:
+        - name: model
+          from: "{{tasks.train.outputs.artifacts.model.uri}}"
+    args: ["--model", "{{tasks.train.outputs.artifacts.model.path}}"]
+```
+
+- **解析时机**：在任务入队前由 Controller 解析模板变量，将 URI/路径注入到下游任务环境变量或参数中。
+- **权限校验**：解析时校验 `task_readers` 与 `tenant/project` 访问范围，避免跨租户读取。
+- **回填与版本**：输出注册后生成稳定引用（如 `artifact_id`/`version`），下游模板可固定到版本。
+
 ## 8. 失败与幂等
 - SDK 上传失败可重试，服务端以 `artifact_id` 去重。
 - 重试时允许覆盖同名 artifact（按版本号递增）。
-

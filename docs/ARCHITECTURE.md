@@ -399,6 +399,22 @@ func (e *PodExecutor) CreateTaskPod(task *model.Task) (*corev1.Pod, error) {
 }
 ```
 
+**Kubernetes API 压力控制（大规模场景）**
+
+- **Client-side throttling**：为 Pod 创建与更新请求设置 QPS/突发限制，避免在高并发 DAG 场景下压垮 apiserver。
+- **Informer cache + work queue**：通过 SharedInformer 缓存 Pod/Node 状态，减少 `GET`/`LIST` 压力，并用指数退避队列处理失败创建。
+- **批处理与限流**：Pod Executor 采用批量创建或并发度上限（worker pool），在负载过高时平滑回压。
+- **可选常驻 Worker 模式**：对短任务可复用长驻 Worker Pod（或 job queue），减少 Pod churn。
+
+### 2.3 Control Plane HA & 并发控制
+
+为了避免多实例 Controller/Scheduler 之间的状态竞争，控制平面在逻辑上保持“单活处理 + 多活热备”的协调策略：
+
+- **Leader Election**：Controller 与 Scheduler 使用 Kubernetes Lease API 进行选主；仅 Leader 负责调度/状态推进。
+- **幂等更新**：所有状态写入携带 `resource_version` 或任务状态机版本号，重复事件不会回滚最终状态。
+- **细粒度锁**：针对同一 workflow/queue 的关键区段，可使用数据库事务锁或 Redis 分布式锁确保串行处理。
+- **故障转移**：Leader 失效后，Lease 过期自动切换；Follower 通过订阅事件总线保持“热备”。
+
 ---
 
 ## 3. Database Design
@@ -4080,6 +4096,12 @@ func (c *TaskTokenClaims) HasScope(required string) bool {
     return false
 }
 ```
+
+### 12.3 Service-to-Service 安全
+
+- **mTLS（可选）**：控制平面组件之间启用双向 TLS，避免跨 namespace 的明文通信。
+- **短期令牌**：SDK 与 Collector/Controller 之间使用短期 task token，最小化权限范围与有效期。
+- **零信任网络策略**：NetworkPolicy 限制 east-west 流量，仅允许必要端口与命名空间访问。
 
 ---
 

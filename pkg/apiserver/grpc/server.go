@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -46,18 +47,9 @@ func (s *Server) UpdateStatus(ctx context.Context, req *pb.UpdateStatusRequest) 
 	workflowIDRaw := strings.TrimSpace(req.GetWorkflowId())
 	statusRaw := strings.TrimSpace(req.GetStatus())
 
-	if taskIDRaw == "" || workflowIDRaw == "" {
-		return nil, status.Error(codes.InvalidArgument, "task_id and workflow_id are required")
-	}
-
-	taskID, err := uuid.Parse(taskIDRaw)
+	taskID, workflowID, err := parseTaskWorkflowIDs(taskIDRaw, workflowIDRaw)
 	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "invalid task_id: %v", err)
-	}
-
-	workflowID, err := uuid.Parse(workflowIDRaw)
-	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "invalid workflow_id: %v", err)
+		return nil, err
 	}
 
 	if statusRaw == "" {
@@ -86,6 +78,104 @@ func (s *Server) UpdateStatus(ctx context.Context, req *pb.UpdateStatusRequest) 
 	}
 
 	return &pb.UpdateStatusResponse{Success: true}, nil
+}
+
+func (s *Server) SetOutput(ctx context.Context, req *pb.SetOutputRequest) (*pb.SetOutputResponse, error) {
+	taskIDRaw := strings.TrimSpace(req.GetTaskId())
+	workflowIDRaw := strings.TrimSpace(req.GetWorkflowId())
+
+	taskID, _, err := parseTaskWorkflowIDs(taskIDRaw, workflowIDRaw)
+	if err != nil {
+		return nil, err
+	}
+
+	key := strings.TrimSpace(req.GetKey())
+	if key == "" {
+		return nil, status.Error(codes.InvalidArgument, "key is required")
+	}
+
+	valueRaw := strings.TrimSpace(req.GetValue())
+	if valueRaw == "" {
+		return nil, status.Error(codes.InvalidArgument, "value is required")
+	}
+
+	var value interface{}
+	if err := json.Unmarshal([]byte(valueRaw), &value); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "value must be valid JSON: %v", err)
+	}
+
+	taskRepo := postgres.NewTaskRepository(s.db.DB())
+	if err := taskRepo.SetOutput(ctx, taskID.String(), key, value); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to store output: %v", err)
+	}
+
+	return &pb.SetOutputResponse{Success: true}, nil
+}
+
+func (s *Server) SaveCheckpoint(ctx context.Context, req *pb.SaveCheckpointRequest) (*pb.SaveCheckpointResponse, error) {
+	taskIDRaw := strings.TrimSpace(req.GetTaskId())
+	workflowIDRaw := strings.TrimSpace(req.GetWorkflowId())
+	data := strings.TrimSpace(req.GetData())
+
+	if data == "" {
+		return nil, status.Error(codes.InvalidArgument, "data is required")
+	}
+
+	_, _, err := parseTaskWorkflowIDs(taskIDRaw, workflowIDRaw)
+	if err != nil {
+		return nil, err
+	}
+
+	if !json.Valid([]byte(data)) {
+		return nil, status.Error(codes.InvalidArgument, "data must be valid JSON")
+	}
+
+	key := checkpointKey(workflowIDRaw, taskIDRaw)
+	payload, err := json.Marshal(map[string]interface{}{
+		"data":      data,
+		"timestamp": req.GetTimestamp(),
+	})
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to encode checkpoint: %v", err)
+	}
+
+	if err := s.redis.Client().Set(ctx, key, payload, 0).Err(); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to store checkpoint: %v", err)
+	}
+
+	return &pb.SaveCheckpointResponse{Success: true}, nil
+}
+
+func (s *Server) GetCheckpoint(ctx context.Context, req *pb.GetCheckpointRequest) (*pb.GetCheckpointResponse, error) {
+	taskIDRaw := strings.TrimSpace(req.GetTaskId())
+	workflowIDRaw := strings.TrimSpace(req.GetWorkflowId())
+
+	_, _, err := parseTaskWorkflowIDs(taskIDRaw, workflowIDRaw)
+	if err != nil {
+		return nil, err
+	}
+
+	key := checkpointKey(workflowIDRaw, taskIDRaw)
+	value, err := s.redis.Client().Get(ctx, key).Result()
+	if err != nil {
+		if err == redis.Nil {
+			return &pb.GetCheckpointResponse{}, nil
+		}
+		return nil, status.Errorf(codes.Internal, "failed to fetch checkpoint: %v", err)
+	}
+
+	var payload struct {
+		Data      string `json:"data"`
+		Timestamp int64  `json:"timestamp"`
+	}
+	if err := json.Unmarshal([]byte(value), &payload); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to decode checkpoint: %v", err)
+	}
+
+	return &pb.GetCheckpointResponse{
+		Data:      payload.Data,
+		Timestamp: payload.Timestamp,
+	}, nil
 }
 
 func (s *Server) StreamLogs(stream pb.TaskService_StreamLogsServer) error {
@@ -167,6 +257,28 @@ func (s *Server) StreamLogs(stream pb.TaskService_StreamLogsServer) error {
 
 func (s *Server) Register(server *grpc.Server) {
 	pb.RegisterTaskServiceServer(server, s)
+}
+
+func parseTaskWorkflowIDs(taskIDRaw, workflowIDRaw string) (uuid.UUID, uuid.UUID, error) {
+	if taskIDRaw == "" || workflowIDRaw == "" {
+		return uuid.Nil, uuid.Nil, status.Error(codes.InvalidArgument, "task_id and workflow_id are required")
+	}
+
+	taskID, err := uuid.Parse(taskIDRaw)
+	if err != nil {
+		return uuid.Nil, uuid.Nil, status.Errorf(codes.InvalidArgument, "invalid task_id: %v", err)
+	}
+
+	workflowID, err := uuid.Parse(workflowIDRaw)
+	if err != nil {
+		return uuid.Nil, uuid.Nil, status.Errorf(codes.InvalidArgument, "invalid workflow_id: %v", err)
+	}
+
+	return taskID, workflowID, nil
+}
+
+func checkpointKey(workflowID, taskID string) string {
+	return fmt.Sprintf("ff:checkpoint:%s:%s", workflowID, taskID)
 }
 
 func isValidTaskStatus(status model.TaskStatus) bool {

@@ -48,5 +48,6 @@ CREATE TABLE workflow_events (
 ## 6. 可观测性
 
 - 监控指标：outbox backlog、stream lag、DLQ size、retry requeue rate。
+- Relay 组件需暴露关键运行指标：扫描批次大小、每批处理耗时、发布失败率、重试次数、consumer ACK 延迟。
+- 告警建议：outbox backlog 持续增长、stream lag 超过阈值、DLQ size 突增。
 - 每类事件带 `trace_id`，便于端到端追踪。
-

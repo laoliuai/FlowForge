@@ -81,6 +81,10 @@ Status Collector 作为 DaemonSet 部署，每个节点运行一个实例；通�
 * **重复事件**：通过 Pod UID 缓存，避免重复发布。
 * **Pod 删除**：仅清理本地缓存，不额外发布失败事件。
 * **异常 Pod**：若 Pod 缺失必要标签（task/workflow ID），记录 debug 日志并跳过。
+* **Evicted 重试策略**：
+  * 当 eviction 原因为 `MemoryPressure`/`DiskPressure`/`NodePressure` 时，优先触发 **指数退避** 重试，并附带抖动（jitter）避免集中重试。
+  * 当 eviction 原因为 `OutOfcpu`/`OutOfmemory` 且超过重试阈值时，标记为 `FAILED` 并进入 DLQ 或告警。
+  * 结合租户级 **retry budget**，在资源紧张时限制并发重试，避免“重试风暴”。
 
 **建议补充**:
 * Pod 被外部删除或驱逐时，记录 `terminated_reason`，以便区分用户取消/系统驱逐。

@@ -35,6 +35,12 @@ graph LR
 
 > 说明：为避免与调度器/执行器状态更新冲突，Status Collector 不发送 `PENDING/QUEUED` 状态。
 
+**Pod Condition 细化映射（补充）**:
+* `ImagePullBackOff` / `ErrImagePull`: `FAILED`（原因：镜像拉取失败）
+* `OOMKilled`: `FAILED`（原因：资源不足，触发重试策略）
+* `Evicted`: `FAILED` 或 `CANCELED`（根据 eviction 原因）
+* `ContainerCreating` 超时: `FAILED`（原因：调度/资源阻塞）
+
 ### 3.2 事件格式
 
 Status Collector 发布的事件使用统一的 TaskEvent 结构：
@@ -75,6 +81,10 @@ Status Collector 作为 DaemonSet 部署，每个节点运行一个实例；通�
 * **重复事件**：通过 Pod UID 缓存，避免重复发布。
 * **Pod 删除**：仅清理本地缓存，不额外发布失败事件。
 * **异常 Pod**：若 Pod 缺失必要标签（task/workflow ID），记录 debug 日志并跳过。
+
+**建议补充**:
+* Pod 被外部删除或驱逐时，记录 `terminated_reason`，以便区分用户取消/系统驱逐。
+* 对重复事件引入幂等键（Pod UID + transition time），避免误覆盖最终状态。
 
 ## 6. 未来规划
 

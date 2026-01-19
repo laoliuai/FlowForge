@@ -135,6 +135,7 @@ FlowForge is a production-grade DAG workflow engine for Kubernetes that addresse
 |-----------|-------------|
 | **Stateless Controllers** | All controllers are stateless; state is persisted in PostgreSQL/Redis |
 | **Event-Driven** | Components communicate via Redis Pub/Sub and task queues |
+| **Reliable Messaging** | Critical state changes use durable queues/outbox and idempotent handlers |
 | **Horizontal Scalability** | All services can scale independently |
 | **No CRD Dependency** | Workflow state stored in database, not Kubernetes CRDs |
 | **Graceful Degradation** | System continues operating if observability components fail |
@@ -1117,6 +1118,17 @@ func (eb *EventBus) Subscribe(ctx context.Context, channels ...string) <-chan *E
 }
 ```
 
+### 4.4 Reliable Messaging & Durable Events
+
+Redis Pub/Sub is retained for low-latency fan-out, but **critical state changes** (task/workflow transitions, retries, quota updates) must be durable:
+
+1. **Transactional Outbox**: controllers persist the state change and an `events` outbox row in the same DB transaction.
+2. **Outbox Relay**: a relay worker reads pending events and publishes them into Redis Streams (or another durable queue).
+3. **Idempotent Consumers**: event handlers store `event_id`/offsets and ignore duplicates.
+4. **Dead-letter Routing**: permanently failed events are moved to a DLQ with retry metadata for inspection.
+
+This design ensures at-least-once delivery and safe recovery after component restarts or Redis failover.
+
 ---
 
 ## 5. Quota Management System
@@ -1170,7 +1182,18 @@ func (eb *EventBus) Subscribe(ctx context.Context, channels ...string) <-chan *E
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 5.2 Quota Manager Implementation
+### 5.2 Atomic Quota Reservation
+
+To avoid over-allocation when multiple schedulers run concurrently, quota updates must be **atomic**:
+
+- **Reservation-first**: scheduler requests a reservation for `CPU/Memory/GPU/Pods` across the hierarchy before enqueueing pods.
+- **Atomic update**: use a single DB transaction or Redis Lua script to validate and increment usage across all hierarchy levels.
+- **Lease expiry**: reservations carry a TTL; if the pod is not created within the lease, usage is released automatically.
+- **Idempotent release**: task completion calls must tolerate duplicates (e.g., by using a unique reservation ID).
+
+This guarantees correctness for Gang Scheduling and prevents race conditions from distributed schedulers.
+
+### 5.3 Quota Manager Implementation
 
 ```go
 // pkg/quota/manager.go
@@ -2841,6 +2864,17 @@ func (cb *CircuitBreaker) GetState(templateKey string) CircuitState {
     return state
 }
 ```
+
+### 8.4 Global Retry Throttling
+
+To prevent retry storms (e.g., cluster-wide outage or dependency failure), retries are additionally gated:
+
+- **Per-tenant retry budget**: each tenant has a token bucket (Redis) limiting concurrent retries.
+- **Per-workflow cap**: configurable maximum retries per workflow per time window.
+- **Backpressure to scheduler**: when retry budget is exhausted, tasks remain in `RETRYING` with a delayed `next_retry_at`.
+- **Observability**: emit metrics for retry throttling events and queue backlog.
+
+This ensures retries do not overload shared services or cause cascading failures.
 
 ---
 

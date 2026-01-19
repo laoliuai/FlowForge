@@ -42,6 +42,9 @@ graph LR
 *   **Stdout 重定向**: SDK 内部实现 `StdoutRedirector` 类，替换 `sys.stdout` 和 `sys.stderr`。
 *   **缓冲机制**: 内部维护一个 `Queue`，避免网络波动阻塞业务逻辑。
 *   **协议**: 使用 Protobuf 定义 `LogEntry` 结构，包含时间戳、级别、内容、任务 ID 等元数据。
+*   **背压策略**:
+    *   队列达到上限时，采用“采样/降级”策略（如仅保留 ERROR/WARN 或按比例丢弃 INFO）。
+    *   可选本地落盘（临时文件）用于短时网络抖动恢复。
 
 ### 3.2 服务端处理 (Go API Server)
 
@@ -52,6 +55,9 @@ graph LR
 *   **可插拔存储**:
     *   通过 `LogStore` 接口抽象存储后端。
     *   根据配置 `logging.storage_driver` 自动选择 `clickhouse` 或 `postgres` 实现。
+*   **幂等与去重**:
+    *   每条日志包含 `log_id`（UUID）或 `(task_id, timestamp, sequence)` 组合键。
+    *   后端写入使用 `log_id` 去重，避免重试导致重复日志。
 
 ### 3.3 存储方案
 
@@ -74,6 +80,10 @@ graph LR
     2.  服务端首先查询数据库，返回最近 N 条历史日志。
     3.  服务端订阅 Redis Channel，将后续产生的实时日志推送给客户端。
     4.  客户端通过 `Last-Event-ID` 机制处理断线重连（可选优化）。
+
+**断线恢复建议**:
+* `Last-Event-ID` 对应日志序列号或时间戳，服务端优先从存储补齐历史，再切换到实时流。
+* 若 Redis 热路径丢失，前端仍可从存储拉取完整日志。
 
 ## 4. 配置说明
 

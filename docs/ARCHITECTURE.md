@@ -55,8 +55,8 @@ FlowForge is a production-grade DAG workflow engine for Kubernetes that addresse
 │        │    │                     │                             │           │
 │        ▼    ▼                     ▼                             ▼           │
 │ ┌────────────────┐    ┌────────────────┐           ┌────────────────┐       │
-│ │  PostgreSQL    │    │     Redis      │           │  ClickHouse/   │       │
-│ │  (DAG Store)   │    │  (Task Queue)  │           │  MongoDB       │       │
+│ │  PostgreSQL    │    │     Kafka      │           │  ClickHouse/   │       │
+│ │  (DAG Store)   │    │ (Events/Queue) │           │  MongoDB       │       │
 │ └────────────────┘    └────────────────┘           │  (Logs/Metrics)│       │
 │                                                     └────────────────┘       │
 │                                                                              │
@@ -103,7 +103,7 @@ FlowForge is a production-grade DAG workflow engine for Kubernetes that addresse
 │                         └────────┬────────┘                              │
 │                                  │                                        │
 │                         ┌────────▼────────┐                              │
-│                         │  Redis Queue    │                              │
+│                         │  Kafka Queue    │                              │
 │                         │  (Publish Task) │                              │
 │                         └────────┬────────┘                              │
 │                                  │                                        │
@@ -134,7 +134,7 @@ FlowForge is a production-grade DAG workflow engine for Kubernetes that addresse
 | Principle | Description |
 |-----------|-------------|
 | **Stateless Controllers** | All controllers are stateless; state is persisted in PostgreSQL/Redis |
-| **Event-Driven** | Components communicate via Redis Pub/Sub and task queues |
+| **Event-Driven** | Components communicate via Kafka topics and task queues |
 | **Reliable Messaging** | Critical state changes use durable queues/outbox and idempotent handlers |
 | **Horizontal Scalability** | All services can scale independently |
 | **No CRD Dependency** | Workflow state stored in database, not Kubernetes CRDs |

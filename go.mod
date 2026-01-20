@@ -10,6 +10,7 @@ require (
 	github.com/lib/pq v1.10.9
 	github.com/prometheus/client_golang v1.23.2
 	github.com/redis/go-redis/v9 v9.17.2
+	github.com/segmentio/kafka-go v0.4.47
 	github.com/spf13/viper v1.21.0
 	go.uber.org/zap v1.27.1
 	google.golang.org/grpc v1.78.0

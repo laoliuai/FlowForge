@@ -17,6 +17,7 @@ import (
 	"github.com/flowforge/flowforge/pkg/queue"
 	"github.com/flowforge/flowforge/pkg/quota"
 	"github.com/flowforge/flowforge/pkg/store/postgres"
+	redisclient "github.com/flowforge/flowforge/pkg/store/redis"
 )
 
 func main() {
@@ -33,6 +34,12 @@ func main() {
 		logger.Fatal("failed to connect to database", zap.Error(err))
 	}
 	defer db.Close()
+
+	redis, err := redisclient.NewClient(&cfg.Redis)
+	if err != nil {
+		logger.Fatal("failed to connect to redis", zap.Error(err))
+	}
+	defer redis.Close()
 
 	k8sClient, err := newKubernetesClient(cfg)
 	if err != nil {
@@ -63,7 +70,20 @@ func main() {
 	})
 	quotaManager := quota.NewManager(db)
 	podExecutor := executor.NewPodExecutor(k8sClient, sdkImage, cfg.Kubernetes.Namespace)
-	runner := executor.NewRunner(queueClient, taskRepo, quotaManager, bus, podExecutor, k8sClient, logger, cfg.Kubernetes.Namespace)
+	runner := executor.NewRunner(
+		queueClient,
+		taskRepo,
+		quotaManager,
+		bus,
+		podExecutor,
+		k8sClient,
+		redis.Client(),
+		logger,
+		cfg.Kubernetes.Namespace,
+		cfg.Executor.HeartbeatInterval,
+		cfg.Executor.HeartbeatTimeout,
+		cfg.Executor.HeartbeatScanInterval,
+	)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -6,7 +6,11 @@ import (
 	"github.com/google/uuid"
 )
 
-const OutboxStatusPending = "pending"
+const (
+	OutboxStatusPending   = "pending"
+	OutboxStatusPublished = "published"
+	OutboxStatusFailed    = "failed"
+)
 
 type WorkflowEvent struct {
 	EventID     uuid.UUID `gorm:"type:uuid;primary_key;default:gen_random_uuid()"`

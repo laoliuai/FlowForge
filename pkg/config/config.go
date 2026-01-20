@@ -15,6 +15,8 @@ type Config struct {
 	ClickHouse ClickHouseConfig
 	Auth       AuthConfig
 	Logging    LoggingConfig
+	Kafka      KafkaConfig
+	Outbox     OutboxRelayConfig
 }
 
 type ServerConfig struct {
@@ -66,8 +68,20 @@ type AuthConfig struct {
 
 type LoggingConfig struct {
 	Level         string `mapstructure:"level"`
-	Format        string `mapstructure:"format"` // json or console
+	Format        string `mapstructure:"format"`         // json or console
 	StorageDriver string `mapstructure:"storage_driver"` // postgres or clickhouse
+}
+
+type KafkaConfig struct {
+	Brokers    []string `mapstructure:"brokers"`
+	ClientID   string   `mapstructure:"client_id"`
+	EventTopic string   `mapstructure:"event_topic"`
+	DLQTopic   string   `mapstructure:"dlq_topic"`
+}
+
+type OutboxRelayConfig struct {
+	PollInterval time.Duration `mapstructure:"poll_interval"`
+	BatchSize    int           `mapstructure:"batch_size"`
 }
 
 func Load() (*Config, error) {
@@ -91,6 +105,11 @@ func Load() (*Config, error) {
 	viper.SetDefault("logging.level", "info")
 	viper.SetDefault("logging.format", "json")
 	viper.SetDefault("logging.storage_driver", "postgres")
+	viper.SetDefault("kafka.client_id", "flowforge-outbox-relay")
+	viper.SetDefault("kafka.event_topic", "flowforge.workflow.events")
+	viper.SetDefault("kafka.dlq_topic", "flowforge.workflow.events.dlq")
+	viper.SetDefault("outbox.poll_interval", "5s")
+	viper.SetDefault("outbox.batch_size", 100)
 
 	if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {

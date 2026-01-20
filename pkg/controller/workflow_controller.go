@@ -167,6 +167,31 @@ func (c *WorkflowController) HandleTaskUpdate(ctx context.Context, taskID string
 	}
 	c.ensureWorkflowState(ctx, task.WorkflowID.String())
 
+	if isFinishedStatus(task.Status) && status != task.Status {
+		c.logger.Debug("ignoring task update for finished task", zap.String("task_id", taskID), zap.String("current", string(task.Status)), zap.String("incoming", string(status)))
+		return nil
+	}
+
+	if statusRank(status) < statusRank(task.Status) {
+		c.logger.Debug("ignoring task status regression", zap.String("task_id", taskID), zap.String("current", string(task.Status)), zap.String("incoming", string(status)))
+		return nil
+	}
+
+	detailUpdates := map[string]interface{}{}
+	if errMsg != "" && task.ErrorMessage == "" {
+		detailUpdates["error_message"] = errMsg
+	}
+	if exitCode != nil && task.ExitCode == nil {
+		detailUpdates["exit_code"] = exitCode
+	}
+
+	if status == task.Status {
+		if len(detailUpdates) == 0 {
+			return nil
+		}
+		return c.taskRepo.UpdateStatus(ctx, taskID, task.Status, detailUpdates)
+	}
+
 	now := time.Now()
 	updates := map[string]interface{}{}
 	if errMsg != "" {
@@ -457,6 +482,23 @@ func isRunningStatus(status model.TaskStatus) bool {
 
 func isFinishedStatus(status model.TaskStatus) bool {
 	return status == model.TaskSucceeded || status == model.TaskFailed || status == model.TaskSkipped
+}
+
+func statusRank(status model.TaskStatus) int {
+	switch status {
+	case model.TaskPending:
+		return 0
+	case model.TaskQueued:
+		return 1
+	case model.TaskRetrying:
+		return 2
+	case model.TaskRunning:
+		return 3
+	case model.TaskSucceeded, model.TaskFailed, model.TaskSkipped:
+		return 4
+	default:
+		return -1
+	}
 }
 
 func newWorkflowStatusEvent(workflowID string, status model.WorkflowStatus, errorMsg string) *model.WorkflowEvent {

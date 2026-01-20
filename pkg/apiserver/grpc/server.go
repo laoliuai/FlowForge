@@ -32,13 +32,13 @@ type Server struct {
 	bus     *eventbus.Bus
 }
 
-func NewServer(db *postgres.Store, redis *redisclient.Client, logRepo store.LogStore, logger *zap.Logger) *Server {
+func NewServer(db *postgres.Store, redis *redisclient.Client, logRepo store.LogStore, logger *zap.Logger, bus *eventbus.Bus) *Server {
 	return &Server{
 		db:      db,
 		redis:   redis,
 		logger:  logger,
 		logRepo: logRepo,
-		bus:     eventbus.NewBus(redis.Client()),
+		bus:     bus,
 	}
 }
 

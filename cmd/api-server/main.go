@@ -16,6 +16,7 @@ import (
 	"github.com/flowforge/flowforge/pkg/apiserver"
 	apigrpc "github.com/flowforge/flowforge/pkg/apiserver/grpc"
 	"github.com/flowforge/flowforge/pkg/config"
+	"github.com/flowforge/flowforge/pkg/eventbus"
 	"github.com/flowforge/flowforge/pkg/store/postgres"
 	redisclient "github.com/flowforge/flowforge/pkg/store/redis"
 )
@@ -41,7 +42,15 @@ func main() {
 	}
 	defer redis.Close()
 
-	server := apiserver.NewServer(db, redis, cfg, logger)
+	bus := eventbus.NewBus(eventbus.BusConfig{
+		Brokers:    cfg.Kafka.Brokers,
+		ClientID:   cfg.Kafka.ClientID,
+		EventTopic: cfg.Kafka.EventTopic,
+		RetryTopic: cfg.Kafka.RetryTopic,
+		DLQTopic:   cfg.Kafka.DLQTopic,
+	})
+
+	server := apiserver.NewServer(db, redis, cfg, logger, bus)
 
 	httpServer := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Server.HTTPPort),
@@ -58,7 +67,7 @@ func main() {
 	}()
 
 	grpcServer := grpc.NewServer()
-	grpcHandler := apigrpc.NewServer(db, redis, server.LogRepo(), logger)
+	grpcHandler := apigrpc.NewServer(db, redis, server.LogRepo(), logger, bus)
 	grpcHandler.Register(grpcServer)
 
 	grpcAddr := fmt.Sprintf(":%d", cfg.Server.GRPCPort)

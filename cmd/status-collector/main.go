@@ -14,7 +14,6 @@ import (
 	"github.com/flowforge/flowforge/pkg/config"
 	"github.com/flowforge/flowforge/pkg/eventbus"
 	"github.com/flowforge/flowforge/pkg/statuscollector"
-	redisclient "github.com/flowforge/flowforge/pkg/store/redis"
 )
 
 func main() {
@@ -26,12 +25,6 @@ func main() {
 	logger, _ := zap.NewProduction()
 	defer logger.Sync()
 
-	redis, err := redisclient.NewClient(&cfg.Redis)
-	if err != nil {
-		logger.Fatal("failed to connect to redis", zap.Error(err))
-	}
-	defer redis.Close()
-
 	k8sClient, err := newKubernetesClient(cfg)
 	if err != nil {
 		logger.Fatal("failed to create kubernetes client", zap.Error(err))
@@ -41,7 +34,13 @@ func main() {
 
 	collector := statuscollector.NewCollector(
 		k8sClient,
-		eventbus.NewBus(redis.Client()),
+		eventbus.NewBus(eventbus.BusConfig{
+			Brokers:    cfg.Kafka.Brokers,
+			ClientID:   cfg.Kafka.ClientID,
+			EventTopic: cfg.Kafka.EventTopic,
+			RetryTopic: cfg.Kafka.RetryTopic,
+			DLQTopic:   cfg.Kafka.DLQTopic,
+		}),
 		logger,
 		cfg.Kubernetes.Namespace,
 		nodeName,

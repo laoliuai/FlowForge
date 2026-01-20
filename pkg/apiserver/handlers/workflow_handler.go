@@ -25,10 +25,11 @@ type WorkflowHandler struct {
 	redis   *redisclient.Client
 	logRepo store.LogStore
 	logger  *zap.Logger
+	bus     *eventbus.Bus
 }
 
-func NewWorkflowHandler(db *postgres.Store, redis *redisclient.Client, logRepo store.LogStore, logger *zap.Logger) *WorkflowHandler {
-	return &WorkflowHandler{db: db, redis: redis, logRepo: logRepo, logger: logger}
+func NewWorkflowHandler(db *postgres.Store, redis *redisclient.Client, logRepo store.LogStore, logger *zap.Logger, bus *eventbus.Bus) *WorkflowHandler {
+	return &WorkflowHandler{db: db, redis: redis, logRepo: logRepo, logger: logger, bus: bus}
 }
 
 type workflowCreateRequest struct {
@@ -373,11 +374,11 @@ func (h *WorkflowHandler) GetLogs(c *gin.Context) {
 
 	query := store.LogQuery{
 		TaskID:    taskID.String(),
-		StartTime:  startTime,
-		EndTime:    endTime,
-		Level:      level,
-		Search:     search,
-		Limit:      limit,
+		StartTime: startTime,
+		EndTime:   endTime,
+		Level:     level,
+		Search:    search,
+		Limit:     limit,
 	}
 
 	if workflowID != nil {
@@ -429,10 +430,9 @@ func (h *WorkflowHandler) GetLogs(c *gin.Context) {
 }
 
 func (h *WorkflowHandler) publishTaskCreatedEvents(ctx context.Context, tasks []*model.Task) {
-	if h.redis == nil {
+	if h.bus == nil {
 		return
 	}
-	bus := eventbus.NewBus(h.redis.Client())
 	for _, task := range tasks {
 		taskEvent := eventbus.TaskEvent{
 			TaskID:     task.ID.String(),
@@ -440,7 +440,7 @@ func (h *WorkflowHandler) publishTaskCreatedEvents(ctx context.Context, tasks []
 			Status:     string(task.Status),
 		}
 		if event, err := eventbus.NewEvent("task_created", taskEvent); err == nil {
-			_ = bus.Publish(ctx, eventbus.ChannelTask, event)
+			_ = h.bus.Publish(ctx, eventbus.ChannelTask, event)
 		}
 	}
 }

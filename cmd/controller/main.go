@@ -12,7 +12,6 @@ import (
 	"github.com/flowforge/flowforge/pkg/controller"
 	"github.com/flowforge/flowforge/pkg/eventbus"
 	"github.com/flowforge/flowforge/pkg/store/postgres"
-	redisclient "github.com/flowforge/flowforge/pkg/store/redis"
 )
 
 func main() {
@@ -30,15 +29,16 @@ func main() {
 	}
 	defer db.Close()
 
-	redis, err := redisclient.NewClient(&cfg.Redis)
-	if err != nil {
-		logger.Fatal("failed to connect to redis", zap.Error(err))
-	}
-	defer redis.Close()
-
 	workflowRepo := postgres.NewWorkflowRepository(db.DB())
 	taskRepo := postgres.NewTaskRepository(db.DB())
-	bus := eventbus.NewBus(redis.Client())
+	bus := eventbus.NewBus(eventbus.BusConfig{
+		Brokers:       cfg.Kafka.Brokers,
+		ClientID:      cfg.Kafka.ClientID,
+		EventTopic:    cfg.Kafka.EventTopic,
+		RetryTopic:    cfg.Kafka.RetryTopic,
+		DLQTopic:      cfg.Kafka.DLQTopic,
+		ConsumerGroup: "flowforge-workflow-controller",
+	})
 
 	controller := controller.NewWorkflowController(workflowRepo, taskRepo, bus, logger)
 

@@ -12,6 +12,7 @@ type Config struct {
 	Database   DatabaseConfig
 	Redis      RedisConfig
 	Kubernetes KubernetesConfig
+	Executor   ExecutorConfig
 	ClickHouse ClickHouseConfig
 	Auth       AuthConfig
 	Logging    LoggingConfig
@@ -49,6 +50,12 @@ type KubernetesConfig struct {
 	InCluster  bool   `mapstructure:"in_cluster"`
 	KubeConfig string `mapstructure:"kubeconfig"`
 	Namespace  string `mapstructure:"namespace"`
+}
+
+type ExecutorConfig struct {
+	HeartbeatInterval     time.Duration `mapstructure:"heartbeat_interval"`
+	HeartbeatTimeout      time.Duration `mapstructure:"heartbeat_timeout"`
+	HeartbeatScanInterval time.Duration `mapstructure:"heartbeat_scan_interval"`
 }
 
 type ClickHouseConfig struct {
@@ -120,6 +127,9 @@ func Load() (*Config, error) {
 	viper.SetDefault("kafka.task_group", "flowforge-executors")
 	viper.SetDefault("outbox.poll_interval", "5s")
 	viper.SetDefault("outbox.batch_size", 100)
+	viper.SetDefault("executor.heartbeat_interval", "5s")
+	viper.SetDefault("executor.heartbeat_timeout", "30s")
+	viper.SetDefault("executor.heartbeat_scan_interval", "15s")
 
 	if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {

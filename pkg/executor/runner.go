@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -104,7 +105,8 @@ func (r *Runner) handleTask(ctx context.Context, taskID string) {
 	if pod.Spec.NodeName != "" {
 		updates["node_name"] = pod.Spec.NodeName
 	}
-	if err := r.taskRepo.UpdateStatus(ctx, task.ID.String(), model.TaskRunning, updates); err != nil {
+	event := newTaskStatusEvent(task, model.TaskRunning, "", nil)
+	if err := r.taskRepo.UpdateStatusWithOutbox(ctx, task.ID.String(), model.TaskRunning, updates, event); err != nil {
 		r.logger.Error("failed to update task to running", zap.String("task_id", task.ID.String()), zap.Error(err))
 	} else {
 		r.publishTaskEvent(ctx, task, model.TaskRunning, "", nil)
@@ -132,7 +134,8 @@ func (r *Runner) handleTask(ctx context.Context, taskID string) {
 		finalUpdates["error_message"] = message
 	}
 
-	if err := r.taskRepo.UpdateStatus(ctx, task.ID.String(), status, finalUpdates); err != nil {
+	finalEvent := newTaskStatusEvent(task, status, message, exitCode)
+	if err := r.taskRepo.UpdateStatusWithOutbox(ctx, task.ID.String(), status, finalUpdates, finalEvent); err != nil {
 		r.logger.Error("failed to update task completion", zap.String("task_id", task.ID.String()), zap.Error(err))
 	} else {
 		r.publishTaskEvent(ctx, task, status, message, exitCode)
@@ -241,7 +244,8 @@ func (r *Runner) failTask(ctx context.Context, task *model.Task, message string,
 	finishTime := time.Now()
 	updates["finished_at"] = &finishTime
 
-	if err := r.taskRepo.UpdateStatus(ctx, task.ID.String(), model.TaskFailed, updates); err != nil {
+	event := newTaskStatusEvent(task, model.TaskFailed, message, exitCode)
+	if err := r.taskRepo.UpdateStatusWithOutbox(ctx, task.ID.String(), model.TaskFailed, updates, event); err != nil {
 		r.logger.Error("failed to mark task failed", zap.String("task_id", task.ID.String()), zap.Error(err))
 		return
 	}
@@ -269,5 +273,26 @@ func (r *Runner) publishTaskEvent(ctx context.Context, task *model.Task, status 
 	}
 	if event, err := eventbus.NewEvent("task_status", taskEvent); err == nil {
 		_ = r.bus.Publish(ctx, eventbus.ChannelTask, event)
+	}
+}
+
+func newTaskStatusEvent(task *model.Task, status model.TaskStatus, message string, exitCode *int) *model.WorkflowEvent {
+	payload := model.JSONB{
+		"task_id":     task.ID.String(),
+		"workflow_id": task.WorkflowID.String(),
+		"status":      string(status),
+	}
+	if message != "" {
+		payload["error_message"] = message
+	}
+	if exitCode != nil {
+		payload["exit_code"] = *exitCode
+	}
+
+	return &model.WorkflowEvent{
+		EventID:   uuid.New(),
+		EventType: "task_status_changed",
+		Payload:   payload,
+		Status:    model.OutboxStatusPending,
 	}
 }

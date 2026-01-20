@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 
 	"github.com/flowforge/flowforge/pkg/controller/dag"
@@ -116,7 +117,8 @@ func (c *WorkflowController) initWorkflowState(workflow *model.Workflow, tasks [
 }
 
 func (c *WorkflowController) startWorkflow(ctx context.Context, workflowID string) error {
-	if err := c.workflowRepo.UpdateStatus(ctx, workflowID, model.WorkflowRunning, ""); err != nil {
+	event := newWorkflowStatusEvent(workflowID, model.WorkflowRunning, "")
+	if err := c.workflowRepo.UpdateStatusWithOutbox(ctx, workflowID, model.WorkflowRunning, "", event); err != nil {
 		return err
 	}
 
@@ -185,14 +187,18 @@ func (c *WorkflowController) HandleTaskUpdate(ctx context.Context, taskID string
 		nextRetry := now.Add(c.retryDelay(task, task.RetryCount+1))
 		updates["retry_count"] = task.RetryCount + 1
 		updates["next_retry_at"] = &nextRetry
-		if err := c.taskRepo.UpdateStatus(ctx, taskID, model.TaskRetrying, updates); err != nil {
+		event := newTaskStatusEvent(task, model.TaskRetrying, errMsg, exitCode)
+		event.Payload["retry_count"] = task.RetryCount + 1
+		event.Payload["next_retry_at"] = nextRetry
+		if err := c.taskRepo.UpdateStatusWithOutbox(ctx, taskID, model.TaskRetrying, updates, event); err != nil {
 			return err
 		}
 		c.updateTaskState(task, model.TaskRetrying)
 		return nil
 	}
 
-	if err := c.taskRepo.UpdateStatus(ctx, taskID, status, updates); err != nil {
+	event := newTaskStatusEvent(task, status, errMsg, exitCode)
+	if err := c.taskRepo.UpdateStatusWithOutbox(ctx, taskID, status, updates, event); err != nil {
 		return err
 	}
 
@@ -284,7 +290,8 @@ func (c *WorkflowController) reconcile(ctx context.Context) {
 				"next_retry_at": nil,
 				"queued_at":     nil,
 			}
-			if err := c.taskRepo.UpdateStatus(ctx, task.ID.String(), model.TaskPending, updates); err != nil {
+			event := newTaskStatusEvent(&task, model.TaskPending, "", nil)
+			if err := c.taskRepo.UpdateStatusWithOutbox(ctx, task.ID.String(), model.TaskPending, updates, event); err != nil {
 				c.logger.Error("failed to reset retry task", zap.String("task_id", task.ID.String()), zap.Error(err))
 				continue
 			}
@@ -429,7 +436,8 @@ func (c *WorkflowController) checkWorkflowCompletion(ctx context.Context, workfl
 		errorMsg = "one or more tasks failed"
 	}
 
-	if err := c.workflowRepo.UpdateStatus(ctx, workflowID, status, errorMsg); err != nil {
+	event := newWorkflowStatusEvent(workflowID, status, errorMsg)
+	if err := c.workflowRepo.UpdateStatusWithOutbox(ctx, workflowID, status, errorMsg, event); err != nil {
 		c.logger.Error("failed to update workflow status", zap.String("workflow_id", workflowID), zap.Error(err))
 		return
 	}
@@ -449,4 +457,40 @@ func isRunningStatus(status model.TaskStatus) bool {
 
 func isFinishedStatus(status model.TaskStatus) bool {
 	return status == model.TaskSucceeded || status == model.TaskFailed || status == model.TaskSkipped
+}
+
+func newWorkflowStatusEvent(workflowID string, status model.WorkflowStatus, errorMsg string) *model.WorkflowEvent {
+	payload := model.JSONB{
+		"workflow_id": workflowID,
+		"status":      string(status),
+	}
+	if errorMsg != "" {
+		payload["error_message"] = errorMsg
+	}
+	return &model.WorkflowEvent{
+		EventID:   uuid.New(),
+		EventType: "workflow_status_changed",
+		Payload:   payload,
+		Status:    model.OutboxStatusPending,
+	}
+}
+
+func newTaskStatusEvent(task *model.Task, status model.TaskStatus, errMsg string, exitCode *int) *model.WorkflowEvent {
+	payload := model.JSONB{
+		"task_id":     task.ID.String(),
+		"workflow_id": task.WorkflowID.String(),
+		"status":      string(status),
+	}
+	if errMsg != "" {
+		payload["error_message"] = errMsg
+	}
+	if exitCode != nil {
+		payload["exit_code"] = *exitCode
+	}
+	return &model.WorkflowEvent{
+		EventID:   uuid.New(),
+		EventType: "task_status_changed",
+		Payload:   payload,
+		Status:    model.OutboxStatusPending,
+	}
 }

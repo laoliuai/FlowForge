@@ -65,5 +65,10 @@ func (s *Scheduler) schedule(ctx context.Context) {
 }
 
 func (s *Scheduler) UpdateTaskStatus(ctx context.Context, taskID string, status model.TaskStatus) error {
-	return s.taskRepo.UpdateStatus(ctx, taskID, status, nil)
+	task, err := s.taskRepo.GetByID(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	event := newTaskStatusEvent(task, status)
+	return s.taskRepo.UpdateStatusWithOutbox(ctx, taskID, status, nil, event)
 }

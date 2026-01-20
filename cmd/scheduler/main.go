@@ -14,7 +14,6 @@ import (
 	"github.com/flowforge/flowforge/pkg/quota"
 	"github.com/flowforge/flowforge/pkg/scheduler"
 	"github.com/flowforge/flowforge/pkg/store/postgres"
-	redisclient "github.com/flowforge/flowforge/pkg/store/redis"
 )
 
 func main() {
@@ -32,15 +31,10 @@ func main() {
 	}
 	defer db.Close()
 
-	redis, err := redisclient.NewClient(&cfg.Redis)
-	if err != nil {
-		logger.Fatal("failed to connect to redis", zap.Error(err))
-	}
-	defer redis.Close()
-
 	workflowRepo := postgres.NewWorkflowRepository(db.DB())
 	taskRepo := postgres.NewTaskRepository(db.DB())
-	queueClient := queue.NewTaskQueue(redis.Client(), "flowforge:tasks")
+	queueClient := queue.NewTaskQueueProducer(cfg.Kafka.Brokers, cfg.Kafka.ClientID, cfg.Kafka.TaskTopic)
+	defer queueClient.Close()
 	bus := eventbus.NewBus(eventbus.BusConfig{
 		Brokers:    cfg.Kafka.Brokers,
 		ClientID:   cfg.Kafka.ClientID,

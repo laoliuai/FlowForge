@@ -78,6 +78,8 @@ type KafkaConfig struct {
 	EventTopic string   `mapstructure:"event_topic"`
 	RetryTopic string   `mapstructure:"retry_topic"`
 	DLQTopic   string   `mapstructure:"dlq_topic"`
+	TaskTopic  string   `mapstructure:"task_topic"`
+	TaskGroup  string   `mapstructure:"task_group"`
 }
 
 type OutboxRelayConfig struct {
@@ -110,6 +112,8 @@ func Load() (*Config, error) {
 	viper.SetDefault("kafka.event_topic", "flowforge.workflow.events")
 	viper.SetDefault("kafka.retry_topic", "flowforge.workflow.events.retry")
 	viper.SetDefault("kafka.dlq_topic", "flowforge.workflow.events.dlq")
+	viper.SetDefault("kafka.task_topic", "flowforge.tasks")
+	viper.SetDefault("kafka.task_group", "flowforge-executors")
 	viper.SetDefault("outbox.poll_interval", "5s")
 	viper.SetDefault("outbox.batch_size", 100)
 

@@ -262,7 +262,8 @@ func (fs *FairScheduler) queueGangTasks(ctx context.Context, tasks []*model.Task
 		updates := map[string]interface{}{
 			"queued_at": &queuedAt,
 		}
-		if err := fs.taskRepo.UpdateStatus(ctx, task.ID.String(), model.TaskQueued, updates); err != nil {
+		event := newTaskQueuedEvent(task, queuedAt)
+		if err := fs.taskRepo.UpdateStatusWithOutbox(ctx, task.ID.String(), model.TaskQueued, updates, event); err != nil {
 			fs.resetQueuedTasks(ctx, queued)
 			return err
 		}
@@ -288,7 +289,8 @@ func (fs *FairScheduler) skipTask(ctx context.Context, task *model.Task) error {
 	updates := map[string]interface{}{
 		"finished_at": &now,
 	}
-	if err := fs.taskRepo.UpdateStatus(ctx, task.ID.String(), model.TaskSkipped, updates); err != nil {
+	event := newTaskStatusEvent(task, model.TaskSkipped)
+	if err := fs.taskRepo.UpdateStatusWithOutbox(ctx, task.ID.String(), model.TaskSkipped, updates, event); err != nil {
 		return err
 	}
 
@@ -301,9 +303,10 @@ func (fs *FairScheduler) skipTask(ctx context.Context, task *model.Task) error {
 
 func (fs *FairScheduler) resetQueuedTasks(ctx context.Context, tasks []*model.Task) {
 	for _, task := range tasks {
-		_ = fs.taskRepo.UpdateStatus(ctx, task.ID.String(), model.TaskPending, map[string]interface{}{
+		event := newTaskStatusEvent(task, model.TaskPending)
+		_ = fs.taskRepo.UpdateStatusWithOutbox(ctx, task.ID.String(), model.TaskPending, map[string]interface{}{
 			"queued_at": nil,
-		})
+		}, event)
 		task.Status = model.TaskPending
 		task.QueuedAt = nil
 	}
@@ -441,5 +444,31 @@ func (fs *FairScheduler) publishTaskStatus(ctx context.Context, task *model.Task
 	}
 	if event, err := eventbus.NewEvent("task_status", taskEvent); err == nil {
 		_ = fs.bus.Publish(ctx, eventbus.ChannelTask, event)
+	}
+}
+
+func newTaskQueuedEvent(task *model.Task, queuedAt time.Time) *model.WorkflowEvent {
+	return &model.WorkflowEvent{
+		EventID:   uuid.New(),
+		EventType: "task_queued",
+		Payload: model.JSONB{
+			"task_id":     task.ID.String(),
+			"workflow_id": task.WorkflowID.String(),
+			"queued_at":   queuedAt,
+		},
+		Status: model.OutboxStatusPending,
+	}
+}
+
+func newTaskStatusEvent(task *model.Task, status model.TaskStatus) *model.WorkflowEvent {
+	return &model.WorkflowEvent{
+		EventID:   uuid.New(),
+		EventType: "task_status_changed",
+		Payload: model.JSONB{
+			"task_id":     task.ID.String(),
+			"workflow_id": task.WorkflowID.String(),
+			"status":      string(status),
+		},
+		Status: model.OutboxStatusPending,
 	}
 }

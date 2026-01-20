@@ -65,6 +65,7 @@ func (s *Store) AutoMigrate() error {
 		&model.Task{},
 		&model.TaskDependency{},
 		&model.TaskEvent{},
+		&model.WorkflowEvent{},
 		&model.LogEntry{},
 	)
 }
@@ -114,6 +115,39 @@ func (r *WorkflowRepository) UpdateStatus(ctx context.Context, id string, status
 	}
 
 	return r.db.WithContext(ctx).Model(&model.Workflow{}).Where("id = ?", id).Updates(updates).Error
+}
+
+func (r *WorkflowRepository) UpdateStatusWithOutbox(ctx context.Context, id string, status model.WorkflowStatus, errorMsg string, event *model.WorkflowEvent) error {
+	updates := map[string]interface{}{
+		"status":     status,
+		"updated_at": time.Now(),
+	}
+
+	if errorMsg != "" {
+		updates["error_message"] = errorMsg
+	}
+
+	if status == model.WorkflowRunning {
+		now := time.Now()
+		updates["started_at"] = &now
+	}
+
+	if status == model.WorkflowSucceeded || status == model.WorkflowFailed || status == model.WorkflowCancelled {
+		now := time.Now()
+		updates["finished_at"] = &now
+	}
+
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&model.Workflow{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+			return err
+		}
+		if event != nil {
+			if err := tx.Create(event).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (r *WorkflowRepository) List(ctx context.Context, projectID string, status *model.WorkflowStatus, limit, offset int) ([]model.Workflow, int64, error) {
@@ -198,6 +232,26 @@ func (r *TaskRepository) UpdateStatus(ctx context.Context, id string, status mod
 	updates["updated_at"] = time.Now()
 
 	return r.db.WithContext(ctx).Model(&model.Task{}).Where("id = ?", id).Updates(updates).Error
+}
+
+func (r *TaskRepository) UpdateStatusWithOutbox(ctx context.Context, id string, status model.TaskStatus, updates map[string]interface{}, event *model.WorkflowEvent) error {
+	if updates == nil {
+		updates = make(map[string]interface{})
+	}
+	updates["status"] = status
+	updates["updated_at"] = time.Now()
+
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&model.Task{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+			return err
+		}
+		if event != nil {
+			if err := tx.Create(event).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (r *TaskRepository) GetPendingTasks(ctx context.Context, workflowID string) ([]model.Task, error) {

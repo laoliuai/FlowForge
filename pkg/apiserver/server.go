@@ -11,6 +11,7 @@ import (
 	"github.com/flowforge/flowforge/pkg/apiserver/handlers"
 	"github.com/flowforge/flowforge/pkg/apiserver/middleware"
 	"github.com/flowforge/flowforge/pkg/config"
+	"github.com/flowforge/flowforge/pkg/eventbus"
 	"github.com/flowforge/flowforge/pkg/store"
 	"github.com/flowforge/flowforge/pkg/store/clickhouse"
 	"github.com/flowforge/flowforge/pkg/store/postgres"
@@ -24,9 +25,10 @@ type Server struct {
 	logRepo store.LogStore
 	cfg     *config.Config
 	logger  *zap.Logger
+	bus     *eventbus.Bus
 }
 
-func NewServer(db *postgres.Store, redis *redisclient.Client, cfg *config.Config, logger *zap.Logger) *Server {
+func NewServer(db *postgres.Store, redis *redisclient.Client, cfg *config.Config, logger *zap.Logger, bus *eventbus.Bus) *Server {
 	var logRepo store.LogStore
 	var err error
 
@@ -53,6 +55,7 @@ func NewServer(db *postgres.Store, redis *redisclient.Client, cfg *config.Config
 		logRepo: logRepo,
 		cfg:     cfg,
 		logger:  logger,
+		bus:     bus,
 	}
 	s.setupRouter()
 
@@ -93,7 +96,7 @@ func (s *Server) setupRouter() {
 	{
 		api.Use(middleware.Auth(s.cfg.Auth))
 
-		workflowHandler := handlers.NewWorkflowHandler(s.db, s.redis, s.logRepo, s.logger)
+		workflowHandler := handlers.NewWorkflowHandler(s.db, s.redis, s.logRepo, s.logger, s.bus)
 		api.POST("/workflows", workflowHandler.Create)
 		api.GET("/workflows", workflowHandler.List)
 		api.GET("/workflows/:id", workflowHandler.Get)

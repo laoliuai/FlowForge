@@ -53,7 +53,13 @@ func main() {
 
 	taskRepo := postgres.NewTaskRepository(db.DB())
 	queueClient := queue.NewTaskQueue(redis.Client(), "flowforge:tasks")
-	bus := eventbus.NewBus(redis.Client())
+	bus := eventbus.NewBus(eventbus.BusConfig{
+		Brokers:    cfg.Kafka.Brokers,
+		ClientID:   cfg.Kafka.ClientID,
+		EventTopic: cfg.Kafka.EventTopic,
+		RetryTopic: cfg.Kafka.RetryTopic,
+		DLQTopic:   cfg.Kafka.DLQTopic,
+	})
 	quotaManager := quota.NewManager(db)
 	podExecutor := executor.NewPodExecutor(k8sClient, sdkImage, cfg.Kubernetes.Namespace)
 	runner := executor.NewRunner(queueClient, taskRepo, quotaManager, bus, podExecutor, k8sClient, logger, cfg.Kubernetes.Namespace)

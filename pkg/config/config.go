@@ -76,6 +76,7 @@ type KafkaConfig struct {
 	Brokers    []string `mapstructure:"brokers"`
 	ClientID   string   `mapstructure:"client_id"`
 	EventTopic string   `mapstructure:"event_topic"`
+	RetryTopic string   `mapstructure:"retry_topic"`
 	DLQTopic   string   `mapstructure:"dlq_topic"`
 }
 
@@ -107,6 +108,7 @@ func Load() (*Config, error) {
 	viper.SetDefault("logging.storage_driver", "postgres")
 	viper.SetDefault("kafka.client_id", "flowforge-outbox-relay")
 	viper.SetDefault("kafka.event_topic", "flowforge.workflow.events")
+	viper.SetDefault("kafka.retry_topic", "flowforge.workflow.events.retry")
 	viper.SetDefault("kafka.dlq_topic", "flowforge.workflow.events.dlq")
 	viper.SetDefault("outbox.poll_interval", "5s")
 	viper.SetDefault("outbox.batch_size", 100)

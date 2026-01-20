@@ -45,7 +45,14 @@ func main() {
 	}
 
 	taskRepo := postgres.NewTaskRepository(db.DB())
-	queueClient := queue.NewTaskQueueConsumer(cfg.Kafka.Brokers, cfg.Kafka.ClientID, cfg.Kafka.TaskGroup, cfg.Kafka.TaskTopic)
+	queueClient := queue.NewTaskQueueConsumer(
+		cfg.Kafka.Brokers,
+		cfg.Kafka.ClientID,
+		cfg.Kafka.TaskGroup,
+		cfg.Kafka.TaskTopic,
+		cfg.Kafka.TaskRetryTopic,
+		cfg.Kafka.TaskDLQTopic,
+	)
 	defer queueClient.Close()
 	bus := eventbus.NewBus(eventbus.BusConfig{
 		Brokers:    cfg.Kafka.Brokers,

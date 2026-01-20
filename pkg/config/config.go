@@ -73,13 +73,15 @@ type LoggingConfig struct {
 }
 
 type KafkaConfig struct {
-	Brokers    []string `mapstructure:"brokers"`
-	ClientID   string   `mapstructure:"client_id"`
-	EventTopic string   `mapstructure:"event_topic"`
-	RetryTopic string   `mapstructure:"retry_topic"`
-	DLQTopic   string   `mapstructure:"dlq_topic"`
-	TaskTopic  string   `mapstructure:"task_topic"`
-	TaskGroup  string   `mapstructure:"task_group"`
+	Brokers        []string `mapstructure:"brokers"`
+	ClientID       string   `mapstructure:"client_id"`
+	EventTopic     string   `mapstructure:"event_topic"`
+	RetryTopic     string   `mapstructure:"retry_topic"`
+	DLQTopic       string   `mapstructure:"dlq_topic"`
+	TaskTopic      string   `mapstructure:"task_topic"`
+	TaskRetryTopic string   `mapstructure:"task_retry_topic"`
+	TaskDLQTopic   string   `mapstructure:"task_dlq_topic"`
+	TaskGroup      string   `mapstructure:"task_group"`
 }
 
 type OutboxRelayConfig struct {
@@ -113,6 +115,8 @@ func Load() (*Config, error) {
 	viper.SetDefault("kafka.retry_topic", "flowforge.workflow.events.retry")
 	viper.SetDefault("kafka.dlq_topic", "flowforge.workflow.events.dlq")
 	viper.SetDefault("kafka.task_topic", "flowforge.tasks")
+	viper.SetDefault("kafka.task_retry_topic", "flowforge.tasks.retry")
+	viper.SetDefault("kafka.task_dlq_topic", "flowforge.tasks.dlq")
 	viper.SetDefault("kafka.task_group", "flowforge-executors")
 	viper.SetDefault("outbox.poll_interval", "5s")
 	viper.SetDefault("outbox.batch_size", 100)

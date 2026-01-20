@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -27,7 +28,6 @@ type Runner struct {
 	k8sClient        kubernetes.Interface
 	logger           *zap.Logger
 	defaultNamespace string
-	dequeueBlock     time.Duration
 	pollInterval     time.Duration
 }
 
@@ -50,50 +50,48 @@ func NewRunner(
 		k8sClient:        k8sClient,
 		logger:           logger,
 		defaultNamespace: defaultNamespace,
-		dequeueBlock:     5 * time.Second,
 		pollInterval:     2 * time.Second,
 	}
 }
 
 func (r *Runner) Run(ctx context.Context) {
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
+		if err := r.queue.Consume(ctx, r.handleQueuedTask); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			r.logger.Error("task queue consume failed", zap.Error(err))
+			time.Sleep(r.pollInterval)
 		}
-
-		queuedTask, err := r.queue.Dequeue(ctx, r.dequeueBlock)
-		if err != nil {
-			r.logger.Error("failed to dequeue task", zap.Error(err))
-			continue
-		}
-		if queuedTask == nil {
-			continue
-		}
-
-		go r.handleTask(ctx, queuedTask.ID.String())
 	}
 }
 
-func (r *Runner) handleTask(ctx context.Context, taskID string) {
+func (r *Runner) handleQueuedTask(ctx context.Context, task *model.Task) error {
+	if task == nil {
+		return errors.New("task is nil")
+	}
+	return r.handleTask(ctx, task.ID.String())
+}
+
+func (r *Runner) handleTask(ctx context.Context, taskID string) error {
 	task, err := r.taskRepo.GetByIDWithWorkflow(ctx, taskID)
 	if err != nil {
 		r.logger.Error("failed to load task", zap.String("task_id", taskID), zap.Error(err))
-		return
+		return err
 	}
 
 	tenantID, projectID, namespace, err := r.taskContext(task)
 	if err != nil {
-		r.failTask(ctx, task, err.Error(), nil)
-		return
+		return r.recordFailure(ctx, task, err.Error(), nil)
 	}
 
 	pod, err := r.podExecutor.ExecuteTaskInNamespace(ctx, task, tenantID, projectID, namespace)
 	if err != nil {
-		r.failTask(ctx, task, err.Error(), nil)
+		if failErr := r.recordFailure(ctx, task, err.Error(), nil); failErr != nil {
+			return failErr
+		}
 		r.releaseQuota(ctx, task)
-		return
+		return err
 	}
 
 	now := time.Now()
@@ -114,12 +112,22 @@ func (r *Runner) handleTask(ctx context.Context, taskID string) {
 
 	completed, err := r.waitForPodCompletion(ctx, namespace, pod.Name)
 	if err != nil {
-		r.failTask(ctx, task, err.Error(), nil)
+		if failErr := r.recordFailure(ctx, task, err.Error(), nil); failErr != nil {
+			return failErr
+		}
 		r.releaseQuota(ctx, task)
-		return
+		return err
 	}
 
 	status, message, exitCode := r.podOutcome(completed)
+	if status == model.TaskFailed {
+		if failErr := r.recordFailure(ctx, task, message, exitCode); failErr != nil {
+			return failErr
+		}
+		r.releaseQuota(ctx, task)
+		return fmt.Errorf("task %s failed", task.ID.String())
+	}
+
 	finishTime := time.Now()
 	finalUpdates := map[string]interface{}{
 		"finished_at": &finishTime,
@@ -142,6 +150,7 @@ func (r *Runner) handleTask(ctx context.Context, taskID string) {
 	}
 
 	r.releaseQuota(ctx, task)
+	return nil
 }
 
 func (r *Runner) taskContext(task *model.Task) (string, string, string, error) {
@@ -232,7 +241,38 @@ func failureMessage(pod *corev1.Pod) string {
 	return pod.Status.Reason
 }
 
-func (r *Runner) failTask(ctx context.Context, task *model.Task, message string, exitCode *int) {
+func (r *Runner) recordFailure(ctx context.Context, task *model.Task, message string, exitCode *int) error {
+	if task.RetryCount < task.RetryLimit {
+		return r.markTaskRetrying(ctx, task, message, exitCode)
+	}
+	return r.markTaskFailed(ctx, task, message, exitCode)
+}
+
+func (r *Runner) markTaskRetrying(ctx context.Context, task *model.Task, message string, exitCode *int) error {
+	updates := map[string]interface{}{}
+	if message != "" {
+		updates["error_message"] = message
+	}
+	if exitCode != nil {
+		updates["exit_code"] = exitCode
+	}
+
+	finishTime := time.Now()
+	updates["finished_at"] = &finishTime
+	updates["retry_count"] = task.RetryCount + 1
+
+	event := newTaskStatusEvent(task, model.TaskRetrying, message, exitCode)
+	event.Payload["retry_count"] = task.RetryCount + 1
+	if err := r.taskRepo.UpdateStatusWithOutbox(ctx, task.ID.String(), model.TaskRetrying, updates, event); err != nil {
+		r.logger.Error("failed to mark task retrying", zap.String("task_id", task.ID.String()), zap.Error(err))
+		return err
+	}
+
+	r.publishTaskEvent(ctx, task, model.TaskRetrying, message, exitCode)
+	return nil
+}
+
+func (r *Runner) markTaskFailed(ctx context.Context, task *model.Task, message string, exitCode *int) error {
 	updates := map[string]interface{}{}
 	if message != "" {
 		updates["error_message"] = message
@@ -247,10 +287,11 @@ func (r *Runner) failTask(ctx context.Context, task *model.Task, message string,
 	event := newTaskStatusEvent(task, model.TaskFailed, message, exitCode)
 	if err := r.taskRepo.UpdateStatusWithOutbox(ctx, task.ID.String(), model.TaskFailed, updates, event); err != nil {
 		r.logger.Error("failed to mark task failed", zap.String("task_id", task.ID.String()), zap.Error(err))
-		return
+		return err
 	}
 
 	r.publishTaskEvent(ctx, task, model.TaskFailed, message, exitCode)
+	return nil
 }
 
 func (r *Runner) releaseQuota(ctx context.Context, task *model.Task) {
